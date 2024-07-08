@@ -1,4 +1,4 @@
-# CSHL
+# Ion Channels Course - CSHL
 Python material for the Cold Spring Harbor Laboratory Ion Channel and Neural Circuits Summer School. 
 ## Installation
 ### Clone git repo to your computer
@@ -8,13 +8,13 @@ Python material for the Cold Spring Harbor Laboratory Ion Channel and Neural Cir
 cd <path where you want to store the CSHL folder>
 ```
 ```
-git clone https://github.com/afmontarras/CSHL.git
+git clone https://github.com/afmontarras/IonChannels_CSHL.git
 ```
-### Copy the folder (create your playground)
-During the course, the reference notebooks will be updated daily following your progress. You will want to create/modify them yourself day by day. So copy the cloned folder so that your own changes will not be affected by updating (pull) the git.
 ### Environment Manager
-You need to install Miniforge:
-- Miniforge/mamba: https://github.com/conda-forge/miniforge (https://mamba.readthedocs.io/en/latest/index.html)
+You need to install an environment manager of your choice:
+- Anaconda/miniconda: https://docs.anaconda.com/anaconda/install/.
+
+- Miniforge/mamba: https://github.com/conda-forge/miniforge (https://mamba.readthedocs.io/en/latest/index.html).
 
 ### Create your CSHL environment
  Write in your terminal:
@@ -22,7 +22,7 @@ You need to install Miniforge:
 cd <path to CSHL directory>
 ```
 ```
-conda update -n base -c conda-forge conda
+conda update conda
 ```
 ```
 conda env create --name CSHL --file CSHL.yml
