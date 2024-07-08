@@ -1,0 +1,18 @@
+name: CSHL
+channels:
+  - conda-forge
+dependencies:
+  - jupyterlab
+  - matplotlib
+  - scipy
+  - pandas
+  - tqdm
+  - ca-certificates
+  - certifi
+  - openssl
+  - nptdms
+  - ipympl
+  - spyder
+  - pip
+  - pip:
+    - pyabf
