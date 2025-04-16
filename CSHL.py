@@ -1,3 +1,40 @@
+def IV(f,vtimes,btimes,ptimes,plot=True,
+       xcoord=(0.9, 0.4),ycoord=(0.45, 0.9)):
+    '''
+    Takes a filename : f
+    ALL TIMES IN SECONDS
+    voltage step window (vtimes): (v_start,v_end)
+    baseline current window (btimes): (i_start,i_end)
+    peak current window (ptimes): (i_start,i_end)
+    plot : boolean to show or not the plot
+    xcoord and ycoord are coordinate for the axis labels
+    
+    returns the peak amplitudes and voltage steps values.
+    '''
+    # Extract the sweeps,time and sampling rate:
+    swps, swp_time, sr = get_sweeps(f)
+    # Extract the start and end window times:
+    v_start,v_end = vtimes
+    b_start,b_end = btimes
+    p_start,p_end = ptimes
+    # extract the voltage steps:
+    voltage_trace = np.mean(swp_window(swps,v_start,v_end,sr,channel=1),axis=1)
+    # extract baseline current:
+    baseline_current = np.mean(swp_window(swps,b_start,b_end,sr,channel=0),axis=1)
+    # extract peak current:
+    peak_window = swp_window(swps,p_start,p_end,sr,channel=0)
+    peak_response = peak(peak_window)
+    # and normalise over the baseline current:
+    peak_response -= baseline_current
+    # plot the result:
+    if plot==True:
+        fig,ax = plt.subplots()
+        ax.plot(voltage_step,peak_response,'-o',alpha=0.9)
+        IV_style(ax,xcoord=xcoord,ycoord=ycoord)
+        plt.show()
+    
+    return voltage_step,peak_response
+
 def IV_style(ax,
             xcoord=(0.9, 0.4),
             ycoord=(0.45, 0.9)):
