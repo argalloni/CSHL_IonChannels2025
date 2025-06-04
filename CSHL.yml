@@ -1,5 +1,6 @@
 name: CSHL
 dependencies:
+  - python=3.11
   - jupyterlab
   - matplotlib
   - scipy
@@ -8,9 +9,10 @@ dependencies:
   - ca-certificates
   - certifi
   - openssl
-  - nptdms
   - ipympl
   - spyder
   - pip
   - pip:
     - pyabf
+    - nptdms
+    - myokit

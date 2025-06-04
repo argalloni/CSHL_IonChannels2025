@@ -2,3 +2,5 @@
 .ipynb_checkpoints/*
 *.pyc
 /.virtual_documents
+/data
+.DS_Store
