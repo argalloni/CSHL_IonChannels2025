@@ -1,0 +1,144 @@
+import matplotlib.pyplot as plt
+import pyabf
+import numpy as np
+
+
+###############################
+# Data import functions
+###############################
+
+def get_sweeps(f):
+    rec = pyabf.ABF(f)
+    swps = []
+    for swpNB in rec.sweepList:
+        rec.setSweep(swpNB)
+        swps.append((rec.sweepY,rec.sweepC))
+    swps = np.array(swps)
+    swp_time = rec.sweepX
+    dt = swp_time[1] 
+    return swps, swp_time, 1/dt
+
+
+###############################
+# Data processing functions
+###############################
+def select_sweep_window(sweeps, time, start, end, sampling_freq, channel=0):
+    i_start = int(start * sampling_freq / 1000)
+    i_end = int(end * sampling_freq / 1000)
+    return sweeps[:,channel,i_start:i_end], time[i_start:i_end]
+
+
+def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, measurement_type):
+    voltage_traces, time_v = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=0)
+    current_traces, time_i = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=1)
+    
+    if measurement_type == 'mean':
+        voltage_steps = np.mean(voltage_traces, axis=1)
+        current_steps = np.mean(current_traces, axis=1)
+    elif measurement_type == 'max':
+        voltage_steps = np.max(voltage_traces, axis=1)
+        current_steps = np.max(current_traces, axis=1)
+    elif measurement_type == 'min':
+        voltage_steps = np.min(voltage_traces, axis=1)
+        current_steps = np.min(current_traces, axis=1)
+
+    return voltage_steps, current_steps
+
+
+# def time_to_index(t, sampling_freq):
+#     """
+#     Convert time in milliseconds to index in the sweep, based on the sampling frequency.
+#     """
+#     return int(t * sampling_freq / 1000)
+
+
+###############################
+# Plotting functions
+###############################
+def update_plot_defaults():
+    plt.rcParams.update({'font.size': 12,
+                     'axes.spines.right': False,
+                     'axes.spines.top': False,
+                     'axes.linewidth':1.2,
+                     'xtick.major.size': 6,
+                     'xtick.major.width': 1.2,
+                     'ytick.major.size': 6,
+                     'ytick.major.width': 1.2,
+                     'legend.frameon': False,
+                     'legend.handletextpad': 0.1,
+                     'svg.fonttype': 'none',
+                     'text.usetex': False})
+
+
+def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=None, ax=None):
+    # Plot traces in the chosen window
+    if ax is None:
+        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=True, height_ratios=(3, 1))
+    ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
+    ax[0].plot(time*1000, voltage_traces.T, color='black', linewidth=0.5)
+    ax[1].plot(time*1000, current_traces.T, color='black', linewidth=0.8)
+    ylims = ax[0].get_ylim()
+    if marker_1 is not None:
+        ax[0].vlines(marker_1, *ylims, color='red', linestyle='-', linewidth=0.5)
+    if marker_2 is not None:
+        ax[0].vlines(marker_2, *ylims, color='red', linestyle='-', linewidth=0.5)
+    ax[1].set_xlabel('Time (ms)')
+    ax[0].set_ylabel('Voltage (mV)')
+    ax[1].set_ylabel('Current (pA)')
+    ax[0].set_xlim(time[0]*1000, time[-1]*1000)
+    return ax
+
+
+def plot_IV(voltage, current, ax=None):
+    if ax is None:
+        fig, ax = plt.subplots()
+    ax.plot(voltage, current,'-o',alpha=0.9)
+    ax.set_xlabel('V (mV)')
+    ax.set_ylabel('I (pA)')
+    ax.spines['left'].set_position('zero')
+    ax.spines['bottom'].set_position('zero')
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    # ax.xaxis.set_label_coords(0.9, 0.4) 
+    # ax.yaxis.set_label_coords(0.4, 0.9)
+
+    # Customize ticks to remove the 0 ticks and labels
+    xticks = [tick for tick in ax.get_xticks() if tick != 0]
+    yticks = [tick for tick in ax.get_yticks() if tick != 0]
+    ax.set_xticks(xticks)
+    ax.set_yticks(yticks)
+    return ax
+
+
+def plot_expontial_fit(sweeps, sweeps_time, start_time, end_time, sampling_freq, ax=None):
+    # Select the voltage only between the markers
+    voltage_traces, t = select_sweep_window(sweeps, sweeps_time, start_time, end_time, sampling_freq, channel=0)
+
+    from scipy.optimize import curve_fit
+    def exp_decay(t, V0, tau, V_inf):
+        return V0 * np.exp(-t / tau) + V_inf
+
+    tau_values = []
+    for trace in voltage_traces:
+        # Initial guess: [V0, tau, V_inf]
+        V0_guess = trace[0] - trace[-1]
+        tau_guess = 50 / sampling_freq  # ms
+        Vinf_guess = trace[-1]
+        p0 = [V0_guess, tau_guess, Vinf_guess]
+
+        popt, _ = curve_fit(exp_decay, t, trace, p0=p0, maxfev=2000)
+        V0_fit, tau_fit, Vinf_fit = popt
+        tau_values.append(tau_fit*1000)
+
+        # Overlay fit
+        fit_trace = exp_decay(t, *popt)
+        if ax is not None:
+            ax[0].plot(t*1000, fit_trace, color='r', alpha=1, linewidth=2)
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    ax.plot(tau_values, 'o-')
+    ax.set_xlabel('Sweep Index')
+    ax.set_ylabel('Tau (ms)')
+    ax.set_title('Tau Values for Each Sweep')
+
+    return tau_values, ax

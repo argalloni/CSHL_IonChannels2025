@@ -25,7 +25,7 @@ cd <path to CSHL directory>
 conda update conda
 ```
 ```
-conda env create --name CSHL --file CSHL.yml
+conda env create --name CSHL_IonChannels2025 --file installation_requirements.yml
 ```
 This will create a CSHL python environment based on the CSHL.yml file present in the CSHL folder. It contains every package you need to start working with th notebooks. You need to activate the environment to work with it: `conda activate CSHL`.
 
