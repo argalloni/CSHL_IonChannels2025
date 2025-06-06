@@ -8,7 +8,7 @@ Python material for the Cold Spring Harbor Laboratory Ion Channel and Neural Cir
 cd <path where you want to store the CSHL folder>
 ```
 ```
-git clone https://github.com/afmontarras/IonChannels_CSHL.git
+git clone https://github.com/argalloni/CSHL_IonChannels2025.git
 ```
 ### Environment Manager
 You need to install an environment manager of your choice:

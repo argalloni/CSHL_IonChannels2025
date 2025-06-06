@@ -28,19 +28,25 @@ def select_sweep_window(sweeps, time, start, end, sampling_freq, channel=0):
     return sweeps[:,channel,i_start:i_end], time[i_start:i_end]
 
 
-def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, measurement_type):
-    voltage_traces, time_v = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=0)
-    current_traces, time_i = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=1)
-    
+def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, measurement_type, abs=False):
+    current_traces, time_i = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=0)
+    voltage_traces, time_v = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=1)
+
     if measurement_type == 'mean':
-        voltage_steps = np.mean(voltage_traces, axis=1)
         current_steps = np.mean(current_traces, axis=1)
+        voltage_steps = np.mean(voltage_traces, axis=1)
     elif measurement_type == 'max':
-        voltage_steps = np.max(voltage_traces, axis=1)
         current_steps = np.max(current_traces, axis=1)
+        voltage_steps = np.max(voltage_traces, axis=1)
     elif measurement_type == 'min':
-        voltage_steps = np.min(voltage_traces, axis=1)
         current_steps = np.min(current_traces, axis=1)
+        voltage_steps = np.min(voltage_traces, axis=1)
+    elif measurement_type == 'peak':
+        current_traces_abs = np.abs(current_traces)
+        current_steps_loc = np.argmax(current_traces_abs, axis=1)
+        num_sweeps = len(current_traces)
+        voltage_steps = voltage_traces[np.arange(num_sweeps), current_traces_abs.argmax(axis=1)]
+        current_steps = current_traces[np.arange(num_sweeps), current_traces_abs.argmax(axis=1)]
 
     return voltage_steps, current_steps
 
@@ -73,7 +79,7 @@ def update_plot_defaults():
 def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=None, ax=None):
     # Plot traces in the chosen window
     if ax is None:
-        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=True, height_ratios=(3, 1))
+        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=False, height_ratios=(3, 1))
     ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
     ax[0].plot(time*1000, voltage_traces.T, color='black', linewidth=0.5)
     ax[1].plot(time*1000, current_traces.T, color='black', linewidth=0.8)
@@ -83,24 +89,26 @@ def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=No
     if marker_2 is not None:
         ax[0].vlines(marker_2, *ylims, color='red', linestyle='-', linewidth=0.5)
     ax[1].set_xlabel('Time (ms)')
-    ax[0].set_ylabel('Voltage (mV)')
-    ax[1].set_ylabel('Current (pA)')
+    ax[1].set_ylabel('Voltage (mV)')
+    ax[0].set_ylabel('Current (pA)')
     ax[0].set_xlim(time[0]*1000, time[-1]*1000)
     return ax
 
 
-def plot_IV(voltage, current, ax=None):
+def plot_IV(voltage, current, ax=None, xlabel_coords=None, ylabel_coords=None):
     if ax is None:
         fig, ax = plt.subplots()
-    ax.plot(voltage, current,'-o',alpha=0.9)
+    ax.plot(voltage, current,'-o', markersize=4, color='black', linewidth=1)
     ax.set_xlabel('V (mV)')
     ax.set_ylabel('I (pA)')
     ax.spines['left'].set_position('zero')
     ax.spines['bottom'].set_position('zero')
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
-    # ax.xaxis.set_label_coords(0.9, 0.4) 
-    # ax.yaxis.set_label_coords(0.4, 0.9)
+    if xlabel_coords is not None:
+        ax.xaxis.set_label_coords(xlabel_coords[0], xlabel_coords[1])
+    if ylabel_coords is not None:
+        ax.yaxis.set_label_coords(ylabel_coords[0], ylabel_coords[1])
 
     # Customize ticks to remove the 0 ticks and labels
     xticks = [tick for tick in ax.get_xticks() if tick != 0]
