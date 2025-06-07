@@ -97,6 +97,7 @@ def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=No
     ax[1].set_ylabel('Voltage (mV)')
     ax[0].set_ylabel('Current (pA)')
     ax[0].set_xlim(time[0]*1000, time[-1]*1000)
+    ax[1].set_xlim(time[0]*1000, time[-1]*1000)
     return ax
 
 
