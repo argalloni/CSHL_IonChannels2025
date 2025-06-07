@@ -106,8 +106,9 @@ def plot_IV(voltage, current, ax=None, xlabel_coords=None, ylabel_coords=None):
     ax.plot(voltage, current,'-o', markersize=4, color='black', linewidth=1)
     ax.set_xlabel('V (mV)')
     ax.set_ylabel('I (pA)')
-    ax.spines['left'].set_position('zero')
-    ax.spines['bottom'].set_position('zero')
+    if np.max(current)>-100:
+        ax.spines['left'].set_position('zero')
+        ax.spines['bottom'].set_position('zero')
     ax.spines['right'].set_visible(False)
     ax.spines['top'].set_visible(False)
     if xlabel_coords is not None:
@@ -149,7 +150,6 @@ def plot_expontial_fit(sweeps, sweeps_time, start_time, end_time, sampling_freq,
     # Select the voltage only between the markers
     voltage_traces, t = select_sweep_window(sweeps, sweeps_time, start_time, end_time, sampling_freq, channel=0)
 
-    from scipy.optimize import curve_fit
     def exp_decay(t, V0, tau, V_inf):
         return V0 * np.exp(-t / tau) + V_inf
 
