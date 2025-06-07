@@ -5,6 +5,6 @@
 *.abf
 *.pro
 .DS_Store
-/data/archive
+/data/archive/*
 /notebook_archive
 /__pycache__
