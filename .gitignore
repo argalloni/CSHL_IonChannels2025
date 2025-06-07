@@ -4,6 +4,7 @@
 *.abf
 *.pro
 *.dat
+*.png
 .DS_Store
 
 /data/archive/
