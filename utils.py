@@ -24,6 +24,10 @@ def get_sweeps(f):
 # Data processing functions
 ###############################
 def select_sweep_window(sweeps, time, start, end, sampling_freq, channel=0):
+    if end != -1:
+        assert start < end, "start_time must be before end_time"
+    assert start < time[-1]*1000, f"start_time ({start} ms) must be before end of sweep: {time[-1]*1000:.3f} ms"
+
     i_start = int(start * sampling_freq / 1000)
     i_end = int(end * sampling_freq / 1000)
     return sweeps[:,channel,i_start:i_end], time[i_start:i_end]
