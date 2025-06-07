@@ -56,11 +56,11 @@ def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, mea
     return voltage_steps, current_steps
 
 
-# def time_to_index(t, sampling_freq):
-#     """
-#     Convert time in milliseconds to index in the sweep, based on the sampling frequency.
-#     """
-#     return int(t * sampling_freq / 1000)
+def time_to_index(t, sampling_freq):
+    """
+    Convert time in milliseconds to index in the sweep, based on the sampling frequency.
+    """
+    return int(t * sampling_freq / 1000)
 
 
 ###############################
@@ -122,28 +122,6 @@ def plot_IV(voltage, current, ax=None, xlabel_coords=None, ylabel_coords=None):
     ax.set_xticks(xticks)
     ax.set_yticks(yticks)
     return ax
-
-
-def fit_single_exponential(time, trace, ax=None, tau_guess=10):
-    def exp_decay(time, V0, tau, V_inf):
-        return V0 * np.exp(-time / tau) + V_inf
-
-    # Initial guess: [V0, tau, V_inf]
-    V0_guess = trace[0] - trace[-1]
-    tau_guess = tau_guess #/ sampling_freq  # ms
-    Vinf_guess = trace[-1]
-    p0 = [V0_guess, tau_guess, Vinf_guess]
-
-    popt, _ = curve_fit(exp_decay, time, trace, p0=p0, maxfev=2000)
-    V0_fit, tau_fit, Vinf_fit = popt
-    tau_ms = tau_fit
-
-    # Overlay fit
-    fit_trace = exp_decay(time, *popt)
-    if ax is not None:
-        ax.plot(time, fit_trace, color='r', alpha=1, linewidth=2)
-
-    return tau_ms
 
 
 def plot_expontial_fit(sweeps, sweeps_time, start_time, end_time, sampling_freq, ax=None):
