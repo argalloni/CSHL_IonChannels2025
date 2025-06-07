@@ -30,7 +30,7 @@ def select_sweep_window(sweeps, time, start, end, sampling_freq, channel=0):
 
     i_start = int(start * sampling_freq / 1000)
     i_end = int(end * sampling_freq / 1000)
-    return sweeps[:,channel,i_start:i_end], time[i_start:i_end]
+    return sweeps[:,channel,i_start:i_end], time[i_start:i_end]*1000
 
 
 def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, measurement_type, abs=False):
@@ -86,8 +86,8 @@ def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=No
     if ax is None:
         fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=False, height_ratios=(3, 1))
     ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
-    ax[0].plot(time*1000, voltage_traces.T, color='black', linewidth=0.5)
-    ax[1].plot(time*1000, current_traces.T, color='black', linewidth=0.8)
+    ax[0].plot(time, voltage_traces.T, color='black', linewidth=0.5)
+    ax[1].plot(time, current_traces.T, color='black', linewidth=0.8)
     ylims = ax[0].get_ylim()
     if marker_1 is not None:
         ax[0].vlines(marker_1, *ylims, color='red', linestyle='-', linewidth=0.5)
@@ -96,8 +96,8 @@ def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=No
     ax[1].set_xlabel('Time (ms)')
     ax[1].set_ylabel('Voltage (mV)')
     ax[0].set_ylabel('Current (pA)')
-    ax[0].set_xlim(time[0]*1000, time[-1]*1000)
-    ax[1].set_xlim(time[0]*1000, time[-1]*1000)
+    ax[0].set_xlim(time[0], time[-1])
+    ax[1].set_xlim(time[0], time[-1])
     return ax
 
 
