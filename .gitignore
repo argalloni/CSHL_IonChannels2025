@@ -1,10 +1,12 @@
     
 .ipynb_checkpoints/*
 *.pyc
-/.virtual_documents
 *.abf
 *.pro
+*.dat
 .DS_Store
-/data/archive/*
+
+/data/archive/
 /notebook_archive
 /__pycache__
+/archive
