@@ -1,48 +1,90 @@
 # Ion Channels Course - CSHL
-Python material for the Cold Spring Harbor Laboratory Ion Channel and Neural Circuits Summer School. 
-## Installation
-### Clone git repo to your computer
-- You can use the desktop git : https://desktop.github.com/
-- Or use the command line : 
+Python material for the Cold Spring Harbor Laboratory (CSHL) course:  
+*Ion Channels in Synaptic & Neural Circuit Physiology*
+
+## Installation instructions (for instructors and TAs)
+### For each of the lab desktop computers, run the following steps:
+### 1. Install VSCode 
+- Got to https://code.visualstudio.com/
+- Download the installer
+- Run the installer (default options are fine)
+- Pin VSCode to the taskbar at the bottom for easy access
+
+### 2. Install Anaconda on all of the lab desktop computers
+ - Got to https://www.anaconda.com/download/success
+ - Download the "Distribution" installer (on the left)
+ - Run the installer (default options are fine)
+
+ ### 3. Install git on all of the lab desktop computers
+ - Got to https://git-scm.com/downloads
+ - Download the Windows installer (if you are on Windows desktop)
+ - Run the installer (default options are fine) 
+
+### 4. Download (git clone) this code repository to each computer
+- Make a new folder on the Desktop called "IonChannelsAnalysisCode" (exact name not important)
+- Open VSCode and open the folder
+- Open the terminal (View > Terminal, or use the keyboard shortcut ctrl+`) 
+- Verify that git is installed correctly by opening a terminal and typing:
 ```
-cd <path where you want to store the CSHL folder>
+git --version
+```
+- If you see a version number, then git is installed correctly.
+- If you don't see a version number, then you need to uninstall and reinstall git.
+
+- If git was installed correctly, type the following commands in the terminal:
+```
+git init
 ```
 ```
 git clone https://github.com/argalloni/CSHL_IonChannels2025.git
 ```
-### Environment Manager
-You need to install an environment manager of your choice:
-- Anaconda/miniconda: https://docs.anaconda.com/anaconda/install/.
+- If the command is successful, you should see a new folder called "CSHL_IonChannels" in your VSCode window (on the left)
 
-- Miniforge/mamba: https://github.com/conda-forge/miniforge (https://mamba.readthedocs.io/en/latest/index.html).
+### 5. Install the required packages
+- In the VSCode terminal, type the following commands 
 
-### Create your CSHL environment
- Write in your terminal:
-```
-cd <path to CSHL directory>
-```
-```
-conda update conda
-```
-```
-conda env create --name CSHL_IonChannels2025 --file installation_requirements.yml
-```
-This will create a CSHL python environment based on the CSHL.yml file present in the CSHL folder. It contains every package you need to start working with th notebooks. You need to activate the environment to work with it: `conda activate CSHL`.
+    (wait for each command to finish running before moving on to the next one):
+    ```
+    cd CSHL_IonChannels
+    ```
+    ```
+    conda update conda
+    ```
+    ```
+    conda env create --name CSHL_IonChannels --file installation_requirements.yml
+    ```
+    ```
+    conda activate CSHL_IonChannels
+    ```
 
-### Launch jupyter lab
-```
-conda activate CSHL
-jupyter lab
-```
-## Update actions : 
-### - CSHL git repo
-```
-cd <path to CSHL directory>
-git pull
-```
+### 5. Install the "ASCAM" software for single channel analysis
+- In the terminal, navigate back up to the main folder (IonChannelsAnalysisCode):
+    - if you are in the CSHL_IonChannels subfolder, type:
+    ```
+    cd ..
+    ```
+- Now we will follow the installation instructions from the ASCAM page: (https://github.com/AGPlested/ASCAM) 
 
-### - CSHL environment
-You need to be on the base environment (easiest way is to open a new terminal): 
-```
-conda env update --name CSHL --file CSHL.yml
-```
+- In the terminal, type the following commands:
+    ```
+    git clone https://github.com/AGPlested/ASCAM.git
+    ```
+    You should see a new folder called "ASCAM" in your VSCode file window (on the left)
+- Navigate to the ASCAM folder. In the terminal, type:
+    ```
+    cd ASCAM
+    ```
+- Install the ASCAM package by typing:
+    ```
+    conda create --name ASCAM python=3.10
+    ```
+    ```
+    conda activate ASCAM
+    ```
+    ```
+    pip install -e .
+    ```
+- Now you should be able to launch the ASCAM software simply by typing in the terminal:
+    ```
+    ascam
+    ```
