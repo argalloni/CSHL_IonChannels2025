@@ -300,7 +300,6 @@ def optimal_cutoff_suggestion(sampling_freq, channel_type='BK'):
         return sampling_freq / 5  # Conservative default
 
 
-
 ##############################
 # Fit Gaussian to histogram 
 ##############################
@@ -622,8 +621,8 @@ class MultiLevelEventDetector:
             print(f"  {name}: {level:.2f} pA")
         
         print(f"Detection thresholds: {[f'{t:.2f}' for t in self.detection_thresholds]} pA")
-        
-    def detect_events_single_trace(self, trace_idx, plot_result=False):
+
+    def detect_events_single_trace_old(self, trace_idx, plot_result=False):
         """
         Detect events in a single trace using the specified levels
         
@@ -785,6 +784,170 @@ class MultiLevelEventDetector:
         
         return events, idealized
 
+    def detect_events_single_trace(self, trace_idx, plot_result=False):
+        """
+        Detect events in a single trace using the specified levels
+        
+        Parameters:
+        -----------
+        trace_idx : int
+            Index of trace to analyze
+        plot_result : bool
+            Whether to plot the results
+            
+        Returns:
+        --------
+        events : list
+            List of events, each containing: [start_time, end_time, level_idx, amplitude]
+        idealized : array
+            Idealized trace
+        """
+        trace = self.traces[trace_idx, :]
+        idealized = np.full_like(trace, self.baseline_level)
+        events = []
+        
+        # Convert minimum duration to samples
+        min_samples = int(self.min_event_duration * self.sampling_freq / 1000)
+
+        # State tracking
+        current_level = 0  # 0 = baseline, 1+ = levels above baseline
+        event_start = 0  # Start tracking from the beginning for baseline events too
+        
+        # Create separate thresholds for up and down transitions with hysteresis
+        all_levels = [self.baseline_level] + self.current_levels
+        
+        # Thresholds for upward transitions (opening)
+        thresholds_up = []
+        # Thresholds for downward transitions (closing)
+        thresholds_down = []
+        
+        for i in range(len(all_levels) - 1):
+            level_diff = all_levels[i+1] - all_levels[i]
+            hysteresis = self.hysteresis_factor * level_diff
+            
+            # Midpoint between levels
+            midpoint = (all_levels[i] + all_levels[i+1]) / 2
+            
+            # Apply hysteresis
+            thresholds_up.append(midpoint + hysteresis/2)
+            thresholds_down.append(midpoint - hysteresis/2)
+        
+        # State machine for event detection
+        for i, current_value in enumerate(trace):
+            new_level = current_level
+            
+            # Determine which level the current value belongs to
+            if current_value <= thresholds_down[0]:
+                # Below first threshold - definitely baseline
+                new_level = 0
+            else:
+                # Check each level from highest to lowest
+                found_level = False
+                
+                # First check if we're above the highest threshold
+                if len(thresholds_up) > 0 and current_value >= thresholds_up[-1]:
+                    new_level = len(self.current_levels)
+                    found_level = True
+                
+                if not found_level:
+                    # Check intermediate levels
+                    for level_idx in range(len(self.current_levels) - 1, -1, -1):
+                        if level_idx == 0:
+                            # Transition from baseline to L1
+                            if current_value >= thresholds_up[0]:
+                                new_level = 1
+                                found_level = True
+                                break
+                        else:
+                            # Transition between levels
+                            if (current_value >= thresholds_down[level_idx] and 
+                                current_value < thresholds_up[level_idx]):
+                                new_level = level_idx
+                                found_level = True
+                                break
+                            elif current_value >= thresholds_up[level_idx]:
+                                new_level = level_idx + 1
+                                found_level = True
+                                break
+                
+                if not found_level:
+                    new_level = 0  # Default to baseline if no level found
+            
+            # Apply some smoothing - only change level if it's stable for a few samples
+            # This helps reduce noise-induced false transitions
+            stable_samples = max(3, int(0.1 * self.sampling_freq / 1000))  # At least 3 samples or 0.1ms
+            
+            if new_level != current_level:
+                # Check if this level change is stable over next few samples
+                if i + stable_samples < len(trace):
+                    future_values = trace[i:i+stable_samples]
+                    stable = True
+                    
+                    for val in future_values:
+                        temp_level = 0
+                        if val <= thresholds_down[0]:
+                            temp_level = 0
+                        else:
+                            for level_idx in range(len(self.current_levels) - 1, -1, -1):
+                                if level_idx == 0:
+                                    if val >= thresholds_up[0]:
+                                        temp_level = 1
+                                        break
+                                else:
+                                    if (val >= thresholds_down[level_idx] and 
+                                        val < thresholds_up[level_idx]):
+                                        temp_level = level_idx
+                                        break
+                                    elif val >= thresholds_up[level_idx]:
+                                        temp_level = level_idx + 1
+                                        break
+                        
+                        if temp_level != new_level:
+                            stable = False
+                            break
+                    
+                    if not stable:
+                        new_level = current_level  # Keep current level if not stable
+            
+            # Handle level changes
+            if new_level != current_level:
+                # End previous event if it was long enough (for any level, including baseline)
+                if (i - event_start) >= min_samples:
+                    end_time = self.time_array[i-1]
+                    level_idx = current_level
+                    amplitude = self.current_levels[current_level-1] if current_level > 0 else self.baseline_level
+                    
+                    events.append([self.time_array[event_start], end_time, level_idx, amplitude])
+                    
+                    # Fill idealized trace for this event
+                    idealized[event_start:i] = amplitude
+                    
+                    # Start new event
+                    event_start = i
+                else:
+                    # Event was too short, so we extend the previous event
+                    # But we'll still change the current level for future checks
+                    current_level = new_level
+                    continue
+                
+                current_level = new_level
+        
+        # Handle final event
+        if (len(trace) - event_start) >= min_samples:
+            end_time = self.time_array[-1]
+            level_idx = current_level
+            amplitude = self.current_levels[current_level-1] if current_level > 0 else self.baseline_level
+            
+            events.append([self.time_array[event_start], end_time, level_idx, amplitude])
+            
+            # Fill idealized trace for this final event
+            idealized[event_start:] = amplitude
+        
+        if plot_result:
+            self.plot_single_trace_result(trace_idx, events, idealized)
+        
+        return events, idealized
+
     def validate_levels(self, trace_idx=0):
         """
         Help validate that the current levels are appropriate for the data
@@ -869,7 +1032,7 @@ class MultiLevelEventDetector:
         ax.set_xlabel('Time (ms)')
         ax.set_ylabel('Current (pA)')
         ax.set_title(f'Event Detection - Trace {trace_idx+1} ({len(events)} events)')
-        ax.legend()
+        ax.legend(handlelength=2, handletextpad=0.5)
         ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -1096,7 +1259,7 @@ class MultiLevelEventDetector:
             if n_levels == 1:
                 axes = [axes]
         else:
-            fig, ax = plt.subplots(figsize=(10, 6))
+            fig, ax = plt.subplots(figsize=(6, 4))
             axes = [ax]
         
         colors = plt.cm.Set2(np.linspace(0, 1, len(durations)))
@@ -1142,7 +1305,7 @@ class MultiLevelEventDetector:
             current_ax.set_xlabel('Duration (ms)')
             current_ax.set_ylabel('Probability Density')
             current_ax.set_title(f'Event Duration Distribution{title_suffix}')
-            current_ax.legend()
+            current_ax.legend(handlelength=2, handletextpad=0.5)
             current_ax.grid(True, alpha=0.3)
         
         plt.tight_layout()
@@ -1198,204 +1361,5 @@ class MultiLevelEventDetector:
                 print(f"  {level_name}: {mean_dur:.2f} ± {std_dur:.2f} ms (median: {median_dur:.2f} ms, n={len(level_durations)})")
         
         print("="*60)
-
-
-
-import ipywidgets as widgets
-from IPython.display import display
-import matplotlib.pyplot as plt
-import numpy as np
-
-class SimpleEventViewer:
-    """
-    Simple viewer for scrolling through event detection results
-    """
-    
-    def __init__(self, detector, events, idealized, trace_idx=0, window_duration=3000):
-        """
-        Initialize the simple viewer
-        
-        Parameters:
-        -----------
-        detector : MultiLevelEventDetector
-            The detector object with data loaded
-        events : list
-            Pre-computed events from detect_events_single_trace
-        idealized : array
-            Pre-computed idealized trace
-        trace_idx : int
-            Trace index to display
-        window_duration : float
-            Duration of viewing window in ms
-        """
-        self.detector = detector
-        self.events = events
-        self.idealized = idealized
-        self.trace_idx = trace_idx
-        self.window_duration = window_duration  # ms
-        
-        # Calculate parameters
-        self.max_time_ms = detector.time_array[-1] * 1000
-        self.step_size = window_duration * 0.5  # 50% overlap
-        self.current_position = 0  # Current window start in ms
-        self.max_position = max(0, self.max_time_ms - window_duration)
-        
-        # Create widgets
-        self.create_widgets()
-        self.update_plot()
-    
-    def create_widgets(self):
-        """Create the simple navigation widgets"""
-        
-        # Navigation buttons
-        self.left_button = widgets.Button(
-            description='← Left',
-            layout=widgets.Layout(width='80px')
-        )
-        
-        self.right_button = widgets.Button(
-            description='Right →',
-            layout=widgets.Layout(width='80px')
-        )
-        
-        # Position info
-        self.position_label = widgets.Label(
-            value=f"Position: {self.current_position:.0f} ms"
-        )
-        
-        # Event info
-        self.event_label = widgets.Label(
-            value="Events: 0"
-        )
-        
-        # Plot output
-        self.plot_output = widgets.Output()
-        
-        # Bind events
-        self.left_button.on_click(self.go_left)
-        self.right_button.on_click(self.go_right)
-        
-        # Layout
-        button_box = widgets.HBox([
-            self.left_button, 
-            self.right_button,
-            widgets.Label('  '),  # Spacer
-            self.position_label,
-            widgets.Label('  '),  # Spacer
-            self.event_label
-        ])
-        
-        self.main_widget = widgets.VBox([
-            button_box,
-            self.plot_output
-        ])
-    
-    def go_left(self, button):
-        """Move window to the left"""
-        self.current_position = max(0, self.current_position - self.step_size)
-        self.update_display()
-    
-    def go_right(self, button):
-        """Move window to the right"""
-        self.current_position = min(self.max_position, self.current_position + self.step_size)
-        self.update_display()
-    
-    def update_display(self):
-        """Update position label and plot"""
-        self.position_label.value = f"Position: {self.current_position:.0f} ms"
-        self.update_plot()
-    
-    def update_plot(self):
-        """Update the plot display"""
-        with self.plot_output:
-            self.plot_output.clear_output(wait=True)
-            
-            # Get window data
-            window_start_s = self.current_position / 1000
-            window_end_s = (self.current_position + self.window_duration) / 1000
-            
-            # Find indices for the window
-            start_idx = np.searchsorted(self.detector.time_array, window_start_s)
-            end_idx = np.searchsorted(self.detector.time_array, window_end_s)
-            
-            if end_idx > len(self.detector.time_array):
-                end_idx = len(self.detector.time_array)
-            
-            # Extract window data
-            time_window = self.detector.time_array[start_idx:end_idx] * 1000  # Convert to ms
-            trace_window = self.detector.traces[self.trace_idx, start_idx:end_idx]
-            idealized_window = self.idealized[start_idx:end_idx]
-            
-            # Count events in window
-            events_in_window = [
-                event for event in self.events
-                if event[0] * 1000 >= self.current_position and 
-                   event[0] * 1000 <= self.current_position + self.window_duration
-            ]
-            
-            # Update event count
-            self.event_label.value = f"Events: {len(events_in_window)}"
-            
-            # Create smaller plot
-            fig, ax = plt.subplots(figsize=(10, 4))  # Smaller figure size
-            
-            # Plot traces
-            ax.plot(time_window, trace_window, 'b-', alpha=0.7, label='Filtered', linewidth=1)
-            ax.plot(time_window, idealized_window, 'r-', linewidth=2, label='Idealized')
-            
-            # Plot level lines
-            ax.axhline(self.detector.baseline_level, color='k', linestyle='--', alpha=0.5, label='Baseline')
-            for i, (level, name) in enumerate(zip(self.detector.current_levels, self.detector.level_names)):
-                ax.axhline(level, color=f'C{i+2}', linestyle='--', alpha=0.7, label=name)
-            
-            # Highlight events with vertical lines
-            for event in events_in_window:
-                start_ms = event[0] * 1000
-                end_ms = event[1] * 1000
-                level_idx = event[2]
-                
-                # Different colors for different levels
-                color = f'C{level_idx+1}' if level_idx > 0 else 'gray'
-                ax.axvspan(start_ms, end_ms, alpha=0.3, color=color)
-            
-            ax.set_xlabel('Time (ms)')
-            ax.set_ylabel('Current (pA)')
-            ax.set_title(f'Trace {self.trace_idx+1} - Events: {len(events_in_window)} in window')
-            ax.legend(loc='upper right', fontsize=8)
-            ax.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            plt.show()
-    
-    def display(self):
-        """Display the widget"""
-        display(self.main_widget)
-
-# Simple function to create the viewer
-def create_simple_viewer(detector, trace_idx=0, window_duration=3000):
-    """
-    Create a simple viewer for pre-detected events
-    
-    Parameters:
-    -----------
-    detector : MultiLevelEventDetector
-        The detector object with data loaded (should have detection already run)
-    trace_idx : int
-        Trace to display
-    window_duration : float
-        Window duration in ms (default 3 seconds)
-    """
-    # Run detection for the specified trace
-    print(f"Running detection on trace {trace_idx+1}...")
-    events, idealized = detector.detect_events_single_trace(trace_idx, plot_result=False)
-    
-    print(f"Found {len(events)} events")
-    
-    # Create and display viewer
-    viewer = SimpleEventViewer(detector, events, idealized, trace_idx, window_duration)
-    viewer.display()
-    
-    return viewer
-
 
 
