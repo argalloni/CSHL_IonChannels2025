@@ -537,7 +537,7 @@ def multi_gaussian(x, *params):
     return y
 
 
-def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200):
+def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None):
     """
     Automatically detect current levels by fitting multiple Gaussians to current histogram
     
@@ -552,6 +552,9 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200):
         Whether to plot the histogram and fitted Gaussians
     bins : int
         Number of histogram bins
+    mean_guesses : list or None
+        Optional list of initial guesses for the means of the Gaussians
+        If provided, must have length equal to n_levels
         
     Returns:
     --------
@@ -568,42 +571,60 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200):
     counts, bin_edges = np.histogram(all_currents, bins=bins, density=True)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
-    # Initial parameter estimation
-    # Use histogram peaks as initial guesses
-    from scipy.signal import find_peaks
+    # Check if valid mean guesses were provided
+    using_custom_means = False
+    if mean_guesses is not None:
+        if len(mean_guesses) == n_levels:
+            using_custom_means = True
+            selected_positions = np.array(mean_guesses)
+            print(f"Using provided mean guesses: {mean_guesses}")
+        else:
+            print(f"Warning: {len(mean_guesses)} mean guesses provided but {n_levels} levels requested.")
+            print("Ignoring provided guesses and using automatic detection.")
     
-    # Find prominent peaks in histogram
-    peaks, properties = find_peaks(counts, height=np.max(counts)*0.1, distance=bins//20)
-    
-    if len(peaks) < n_levels:
-        print(f"Warning: Only found {len(peaks)} peaks, but requested {n_levels} levels")
-        print("Using evenly spaced levels as backup")
-        # Fallback: evenly spaced levels
-        data_range = np.max(all_currents) - np.min(all_currents)
-        detected_levels = [np.min(all_currents) + i * data_range / (n_levels-1) 
-                          for i in range(n_levels)]
-        return sorted(detected_levels), {}
-    
-    # Sort peaks by position and take the n_levels highest ones
-    peak_heights = counts[peaks]
-    peak_positions = bin_centers[peaks]
-    
-    # Sort by height and take top n_levels peaks
-    sorted_indices = np.argsort(peak_heights)[::-1][:n_levels]
-    selected_peaks = peaks[sorted_indices]
-    selected_positions = peak_positions[sorted_indices]
-    
-    # Sort selected peaks by position (current value)
-    position_order = np.argsort(selected_positions)
-    selected_positions = selected_positions[position_order]
-    selected_peaks = selected_peaks[position_order]
+    # If no valid mean guesses provided, estimate initial parameters from histogram
+    if not using_custom_means:
+        # Use histogram peaks as initial guesses
+        
+        # Find prominent peaks in histogram
+        peaks, properties = signal.find_peaks(counts, height=np.max(counts)*0.1, distance=bins//20)
+        
+        if len(peaks) < n_levels:
+            print(f"Warning: Only found {len(peaks)} peaks, but requested {n_levels} levels")
+            print("Using evenly spaced levels as backup")
+            # Fallback: evenly spaced levels
+            data_range = np.max(all_currents) - np.min(all_currents)
+            detected_levels = [np.min(all_currents) + i * data_range / (n_levels-1) 
+                            for i in range(n_levels)]
+            return sorted(detected_levels), {}
+        
+        # Sort peaks by position and take the n_levels highest ones
+        peak_heights = counts[peaks]
+        peak_positions = bin_centers[peaks]
+        
+        # Sort by height and take top n_levels peaks
+        sorted_indices = np.argsort(peak_heights)[::-1][:n_levels]
+        selected_peaks = peaks[sorted_indices]
+        selected_positions = peak_positions[sorted_indices]
+        
+        # Sort selected peaks by position (current value)
+        position_order = np.argsort(selected_positions)
+        selected_positions = selected_positions[position_order]
+        selected_peaks = selected_peaks[position_order]
     
     # Initial parameter guesses: [amp1, mean1, std1, amp2, mean2, std2, ...]
     initial_params = []
     
-    for i, peak_idx in enumerate(selected_peaks):
-        amp_guess = counts[peak_idx]
-        mean_guess = bin_centers[peak_idx]
+    # Determine appropriate amplitudes and stds for the means (either provided or detected)
+    for i, mean_guess in enumerate(selected_positions):
+        # For amplitude, find closest bin if using custom means
+        if using_custom_means:
+            closest_bin = np.argmin(np.abs(bin_centers - mean_guess))
+            amp_guess = counts[closest_bin]
+        else:
+            peak_idx = selected_peaks[i]
+            amp_guess = counts[peak_idx]
+        
         std_guess = (np.max(all_currents) - np.min(all_currents)) / (n_levels * 4)  # Conservative estimate
         
         initial_params.extend([amp_guess, mean_guess, std_guess])
@@ -612,6 +633,9 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200):
     # Amplitudes: positive, means: within data range, stds: reasonable range
     data_min, data_max = np.min(all_currents), np.max(all_currents)
     data_range = data_max - data_min
+
+    data_max = max(data_max, np.max(selected_positions))
+    data_min = min(data_min, np.min(selected_positions))
     
     lower_bounds = []
     upper_bounds = []
@@ -625,7 +649,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200):
         popt, pcov = curve_fit(multi_gaussian, bin_centers, counts, 
                               p0=initial_params, 
                               bounds=(lower_bounds, upper_bounds),
-                              maxfev=5000)
+                              maxfev=100_000)
         
         # Extract fitted parameters
         fitted_levels = []
