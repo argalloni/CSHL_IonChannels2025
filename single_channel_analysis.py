@@ -175,6 +175,222 @@ def adaptive_baseline_correction(data, sampling_freq, closed_level_percentile=20
         return corrected_traces
 
 
+def remove_line_noise(data, sampling_freq, target_freq=None, bandwidth=2.0, notch_quality=30, 
+                      harmonics=2, method='notch', plot_spectrum=False, **kwargs):
+    """
+    Filter out 50/60 Hz power line noise and harmonics from electrophysiology recordings.
+    
+    Parameters:
+    -----------
+    data : array-like
+        Input signal(s). Can be 1D or 2D array.
+    sampling_freq : float
+        Sampling frequency in Hz
+    target_freq : float or None
+        Target frequency to remove (50 or 60 Hz). If None, attempts to auto-detect.
+    bandwidth : float
+        Width of the filter around the target frequency (Hz)
+    notch_quality : float
+        Quality factor for notch filter. Higher values create narrower notches.
+    harmonics : int
+        Number of harmonics to filter (1 = just fundamental, 2 = fundamental + 1st harmonic, etc.)
+    method : str
+        'notch' - IIR notch filter
+        'bandstop' - Butterworth bandstop filter
+        'fft' - FFT-based spectral subtraction
+    plot_spectrum : bool
+        If True, plots the signal spectrum before and after filtering (requires matplotlib)
+    **kwargs : additional parameters for specific methods
+    
+    Returns:
+    --------
+    filtered_data : ndarray
+        Data with line noise removed
+    noise_component : ndarray
+        Extracted noise component (for visualization)
+    """
+    
+    if data.ndim == 1:
+        data = data[np.newaxis, :]  # Make 2D for consistent processing
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    filtered_data = np.zeros_like(data)
+    noise_component = np.zeros_like(data)
+    
+    # Auto-detect line frequency if not specified
+    if target_freq is None:
+        target_freq = _detect_line_frequency(data[0], sampling_freq)
+        print(f"Detected line frequency: {target_freq} Hz")
+    
+    for i in range(data.shape[0]):
+        trace = data[i, :].copy()
+        
+        if method == 'notch':
+            # Apply IIR notch filter at fundamental and harmonics
+            filtered = trace.copy()
+            extracted_noise = np.zeros_like(trace)
+            
+            for h in range(1, harmonics + 1):
+                freq = target_freq * h
+                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                    continue
+                    
+                # Create and apply notch filter
+                b, a = signal.iirnotch(freq, notch_quality, sampling_freq)
+                
+                # Store the noise component
+                noise_component_h = filtered - signal.filtfilt(b, a, filtered)
+                extracted_noise += noise_component_h
+                
+                # Apply the filter
+                filtered = signal.filtfilt(b, a, filtered)
+            
+            filtered_trace = filtered
+            noise = extracted_noise
+            
+        elif method == 'bandstop':
+            # Apply Butterworth bandstop filters
+            filtered = trace.copy()
+            extracted_noise = np.zeros_like(trace)
+            
+            for h in range(1, harmonics + 1):
+                freq = target_freq * h
+                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                    continue
+                
+                # Define stop band
+                low_cutoff = freq - bandwidth/2
+                high_cutoff = freq + bandwidth/2
+                
+                # Ensure cutoffs are within valid range
+                low_cutoff = max(0.1, low_cutoff)  # Avoid too low frequencies
+                high_cutoff = min(sampling_freq/2 - 0.1, high_cutoff)  # Avoid Nyquist
+                
+                # Create and apply bandstop filter
+                order = kwargs.get('filter_order', 4)
+                sos = signal.butter(order, [low_cutoff, high_cutoff], 
+                                   btype='bandstop', fs=sampling_freq, output='sos')
+                
+                # Store the noise component
+                noise_component_h = filtered - signal.sosfiltfilt(sos, filtered)
+                extracted_noise += noise_component_h
+                
+                # Apply the filter
+                filtered = signal.sosfiltfilt(sos, filtered)
+            
+            filtered_trace = filtered
+            noise = extracted_noise
+            
+        elif method == 'fft':
+            # FFT-based spectral subtraction
+            n = len(trace)
+            
+            # Compute FFT
+            fft_data = np.fft.rfft(trace)
+            freqs = np.fft.rfftfreq(n, 1/sampling_freq)
+            
+            # Create a mask for the fundamental and harmonics
+            mask = np.ones_like(fft_data, dtype=bool)
+            
+            for h in range(1, harmonics + 1):
+                freq = target_freq * h
+                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                    continue
+                
+                # Find indices within bandwidth of the target frequency
+                indices = np.where(np.abs(freqs - freq) <= bandwidth/2)[0]
+                mask[indices] = False
+            
+            # Create filtered spectrum and noise spectrum
+            noise_spectrum = fft_data.copy()
+            noise_spectrum[mask] = 0  # Only keep noise frequencies
+            
+            filtered_spectrum = fft_data.copy()
+            filtered_spectrum[~mask] = 0  # Zero out noise frequencies
+            
+            # Inverse FFT to get time domain signals
+            filtered_trace = np.fft.irfft(fft_data * mask, n=n)
+            noise = np.fft.irfft(noise_spectrum, n=n)
+            
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        filtered_data[i, :] = filtered_trace
+        noise_component[i, :] = noise
+    
+    # Optional spectrum plot
+    if plot_spectrum:
+        _plot_spectrum_comparison(data[0], filtered_data[0], sampling_freq, target_freq, harmonics, bandwidth)
+    
+    if squeeze_output:
+        return filtered_data[0], noise_component[0]
+    else:
+        return filtered_data, noise_component
+
+
+def _detect_line_frequency(data, sampling_freq):
+    """
+    Auto-detect whether 50Hz or 60Hz noise is more prominent
+    """
+    # Compute power spectrum
+    f, pxx = signal.welch(data, fs=sampling_freq, nperseg=min(8192, len(data)))
+    
+    # Look at power around 50Hz and 60Hz
+    band_width = 1.0  # Hz
+    
+    # Find indices for frequencies of interest
+    idx_50 = np.where((f >= 50 - band_width) & (f <= 50 + band_width))[0]
+    idx_60 = np.where((f >= 60 - band_width) & (f <= 60 + band_width))[0]
+    
+    # Calculate power in each band
+    power_50 = np.mean(pxx[idx_50]) if len(idx_50) > 0 else 0
+    power_60 = np.mean(pxx[idx_60]) if len(idx_60) > 0 else 0
+    
+    # Return the frequency with more power
+    if power_50 > power_60:
+        return 50.0
+    else:
+        return 60.0
+
+
+def _plot_spectrum_comparison(original, filtered, sampling_freq, target_freq, harmonics, bandwidth):
+    """
+    Plot spectrum before and after filtering
+    """
+    # Compute spectra
+    f1, pxx1 = signal.welch(original, fs=sampling_freq, nperseg=min(8192, len(original)))
+    f2, pxx2 = signal.welch(filtered, fs=sampling_freq, nperseg=min(8192, len(filtered)))
+    
+    # Create plot
+    plt.figure(figsize=(12, 6))
+    
+    # Plot spectra
+    plt.semilogy(f1, pxx1, 'b', alpha=0.7, label='Original')
+    plt.semilogy(f2, pxx2, 'r', alpha=0.7, label='Filtered')
+    
+    # Highlight filtered regions
+    for h in range(1, harmonics + 1):
+        freq = target_freq * h
+        if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+            continue
+        
+        plt.axvspan(freq - bandwidth/2, freq + bandwidth/2, 
+                    color='yellow', alpha=0.3)
+        plt.axvline(freq, color='orange', linestyle='--', 
+                    alpha=0.8, label=f'{freq} Hz' if h==1 else None)
+    
+    plt.xlim(0, min(200, sampling_freq/2))  # Focus on lower frequencies
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Power Spectral Density')
+    plt.title('Spectrum Before and After Line Noise Filtering')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+    
+
 ##############################
 # Highpass filter
 ##############################
