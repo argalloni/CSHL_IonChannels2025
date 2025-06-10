@@ -88,3 +88,5 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     ```
     ascam
     ```
+
+- **Note:** ASCAM is only installed in the local environment called "ASCAM". This needs to be active in order to launch ASCAM.
