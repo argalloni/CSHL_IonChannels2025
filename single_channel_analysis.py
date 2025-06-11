@@ -694,7 +694,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
             # Plot fitted curve
             x_smooth = np.linspace(data_min, data_max, 1000)
             y_fitted_smooth = multi_gaussian(x_smooth, *popt)
-            ax1.plot(x_smooth, y_fitted_smooth, 'r-', linewidth=2, label='Fitted Gaussians')
+            # ax1.plot(x_smooth, y_fitted_smooth, 'r-', linewidth=2, label='Fitted Gaussians')
             
             # Plot individual Gaussians
             colors = plt.cm.Set1(np.linspace(0, 1, n_levels))
@@ -704,7 +704,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
                 std = popt[i*3 + 2]
                 
                 individual_gaussian = amp * np.exp(-0.5 * ((x_smooth - mean) / std)**2)
-                ax1.plot(x_smooth, individual_gaussian, '--', color=colors[i], 
+                ax1.plot(x_smooth, individual_gaussian, '-', color='red', 
                         label=f'Level {i+1}: {mean:.2f} pA')
                 ax1.axvline(mean, color=colors[i], linestyle=':', alpha=0.8)
         else:
@@ -731,7 +731,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
         for i, level in enumerate(fitted_levels):
             ax2.axhline(level, color=colors[i], linestyle='--', linewidth=2,
-                       label=f'Level {i+1}: {level:.2f} pA')
+                       label=f'Level {i}: {level:.2f} pA')
         
         ax2.set_xlabel('Sample Number')
         ax2.set_ylabel('Current (pA)')
@@ -746,7 +746,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     print(f"\n=== LEVEL DETECTION RESULTS ===")
     print(f"Detected {len(fitted_levels)} current levels:")
     for i, level in enumerate(fitted_levels):
-        print(f"  Level {i+1}: {level:.3f} pA")
+        print(f"  Level {i}: {level:.3f} pA")
     
     if fit_stats.get('fit_success', False):
         print(f"Fit quality (R²): {fit_stats['r_squared']:.3f}")
@@ -1292,7 +1292,7 @@ class MultiLevelEventDetector:
 
             counts, actual_bins, patches = current_ax.hist(
                 level_durations, bins=bin_edges, alpha=0.7,
-                color=colors[i], label=level_name,
+                color=colors[0], label=level_name,
                 density=False, edgecolor='white', linewidth=0.5)
 
             if threshold is not None and level_name == 'Baseline':
