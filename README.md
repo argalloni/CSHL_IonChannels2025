@@ -74,19 +74,13 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     ```
     cd ASCAM
     ```
-- Install the ASCAM package by typing:
+- Install the miniML package (for miniEPCS analysis) by typing:
     ```
-    conda create --name ASCAM python=3.10
-    ```
-    ```
-    conda activate ASCAM
+    conda create --name miniML python=3.10
     ```
     ```
-    pip install -e .
-    ```
-- Now you should be able to launch the ASCAM software simply by typing in the terminal:
-    ```
-    ascam
+    conda activate miniML
     ```
 
-- **Note:** ASCAM is only installed in the local environment called "ASCAM". This needs to be active in order to launch ASCAM.
+
+- **Note:** miniML is only installed in the local environment called "miniML". This needs to be active in order to run miniML.

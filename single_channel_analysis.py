@@ -1463,6 +1463,99 @@ class MultiLevelEventDetector:
 
         return durations
 
+
+    def calculate_open_probability(self, method='time_based'):
+        """
+        Calculate open probability (Po) for the channels
+        
+        Parameters:
+        -----------
+        method : str
+            'time_based': fraction of time spent in open states
+            'event_based': fraction of events that are openings
+            
+        Returns:
+        --------
+        po_overall : float
+            Overall open probability (all levels combined)
+        po_by_level : dict
+            Open probability for each individual level
+        statistics : dict
+            Additional statistics
+        """
+        if not self.event_lists or self.idealized_traces is None:
+            raise ValueError("No events detected. Run detect_all_events() first.")
+        
+        if method == 'time_based':
+            return self._calculate_po_time_based()
+        elif method == 'event_based':
+            return self._calculate_po_event_based()
+        else:
+            raise ValueError("Method must be 'time_based' or 'event_based'")
+    
+    def _calculate_po_time_based(self):
+        """Calculate Po based on fraction of time spent open"""
+        total_time = 0
+        open_time_overall = 0
+        open_time_by_level = {name: 0 for name in self.level_names}
+        
+        for trace_idx in range(self.n_sweeps):
+            trace_duration = len(self.idealized_traces[trace_idx]) / self.sampling_freq
+            total_time += trace_duration
+            
+            # Count time at each level
+            for level_idx in range(1, len(self.current_levels) + 1):
+                level_name = self.level_names[level_idx - 1]
+                level_value = self.current_levels[level_idx - 1]
+                
+                # Count samples at this level
+                samples_at_level = np.sum(self.idealized_traces[trace_idx] == level_value)
+                time_at_level = samples_at_level / self.sampling_freq
+                
+                open_time_by_level[level_name] += time_at_level
+                open_time_overall += time_at_level
+        
+        # Calculate probabilities
+        po_overall = open_time_overall / total_time if total_time > 0 else 0
+        po_by_level = {name: time / total_time for name, time in open_time_by_level.items()}
+        
+        statistics = {
+            'total_recording_time_s': total_time,
+            'total_open_time_s': open_time_overall,
+            'total_closed_time_s': total_time - open_time_overall,
+            'method': 'time_based'
+        }
+        
+        return po_overall, po_by_level, statistics
+    
+    def _calculate_po_event_based(self):
+        """Calculate Po based on event frequency (less common for single channels)"""
+        total_events = 0
+        open_events = 0
+        events_by_level = {name: 0 for name in self.level_names}
+        
+        for events in self.event_lists:
+            for event in events:
+                start_time, end_time, level_idx, amplitude = event
+                total_events += 1
+                
+                if level_idx > 0:  # Open state
+                    open_events += 1
+                    level_name = self.level_names[level_idx - 1]
+                    events_by_level[level_name] += 1
+        
+        po_overall = open_events / total_events if total_events > 0 else 0
+        po_by_level = {name: count / total_events for name, count in events_by_level.items()}
+        
+        statistics = {
+            'total_events': total_events,
+            'open_events': open_events,
+            'closed_events': total_events - open_events,
+            'method': 'event_based'
+        }
+        
+        return po_overall, po_by_level, statistics
+
     def analyze_bursts(self, closed_duration_threshold):
         """
         Analyze channel activity in bursts/blocks separated by long closed intervals
@@ -1740,6 +1833,55 @@ class MultiLevelEventDetector:
         
         print("="*60)
 
+  
+    def generate_analysis_report_old(self):
+        """
+        Generate a comprehensive analysis report
+        """
+        if not self.event_lists:
+            print("No events detected. Run detect_all_events() first.")
+            return
+        
+        print("="*60)
+        print("SINGLE-CHANNEL ANALYSIS REPORT")
+        print("="*60)
+        
+        # Basic statistics
+        total_events = sum(len(events) for events in self.event_lists)
+        print(f"\nBASIC STATISTICS:")
+        print(f"  Number of traces: {self.n_sweeps}")
+        print(f"  Total events detected: {total_events}")
+        print(f"  Events per trace: {total_events/self.n_sweeps:.1f} ± {np.std([len(events) for events in self.event_lists]):.1f}")
+        
+        # Current levels
+        print(f"\nCURRENT LEVELS:")
+        print(f"  Baseline: {self.baseline_level:.2f} pA")
+        for i, (level, name) in enumerate(zip(self.current_levels, self.level_names)):
+            print(f"  {name}: {level:.2f} pA")
+        
+        # Open probability
+        po_overall, po_by_level, po_stats = self.calculate_open_probability()
+        print(f"\nOPEN PROBABILITY:")
+        print(f"  Overall Po: {po_overall:.4f} ({po_overall*100:.2f}%)")
+        for level_name, po in po_by_level.items():
+            print(f"  {level_name} Po: {po:.4f} ({po*100:.2f}%)")
+        
+        print(f"\nRECORDING TIME:")
+        print(f"  Total: {po_stats['total_recording_time_s']:.1f} s")
+        print(f"  Open: {po_stats['total_open_time_s']:.1f} s")
+        print(f"  Closed: {po_stats['total_closed_time_s']:.1f} s")
+        
+        # Duration statistics
+        durations = self.calculate_event_durations()
+        print(f"\nEVENT DURATIONS:")
+        for level_name, level_durations in durations.items():
+            if level_durations:
+                mean_dur = np.mean(level_durations)
+                median_dur = np.median(level_durations)
+                std_dur = np.std(level_durations)
+                print(f"  {level_name}: {mean_dur:.2f} ± {std_dur:.2f} ms (median: {median_dur:.2f} ms, n={len(level_durations)})")
+        
+        print("="*60)
 
 
 
