@@ -114,18 +114,25 @@ def update_plot_defaults():
                      'text.usetex': False})
 
 
-def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=None, ax=None):
+def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
     # Plot traces in the chosen window
     if ax is None:
-        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=False, height_ratios=(3, 1))
+        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=False, height_ratios=height_ratios)
     ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
     ax[0].plot(time, voltage_traces.T, color='black', linewidth=0.5)
     ax[1].plot(time, current_traces.T, color='black', linewidth=0.8)
-    ylims = ax[0].get_ylim()
+    ylims0 = ax[0].get_ylim()
+    ylims1 = ax[1].get_ylim()
     if marker_1 is not None:
-        ax[0].vlines(marker_1, *ylims, color='red', linestyle='-', linewidth=0.5)
+        ax[0].vlines(marker_1, *ylims0, color='red', linestyle='-', linewidth=0.5)
+        ax[1].vlines(marker_1, *ylims1, color='red', linestyle='-', linewidth=0.5)
+        ax[0].text(marker_1, ylims0[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
+        ax[1].text(marker_1, ylims1[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
     if marker_2 is not None:
-        ax[0].vlines(marker_2, *ylims, color='red', linestyle='-', linewidth=0.5)
+        ax[0].vlines(marker_2, *ylims0, color='red', linestyle='-', linewidth=0.5)
+        ax[1].vlines(marker_2, *ylims1, color='red', linestyle='-', linewidth=0.5)
+        ax[0].text(marker_2, ylims0[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
+        ax[1].text(marker_2, ylims1[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
     ax[1].set_xlabel('Time (ms)')
     ax[1].set_ylabel('Voltage (mV)')
     ax[0].set_ylabel('Current (pA)')
