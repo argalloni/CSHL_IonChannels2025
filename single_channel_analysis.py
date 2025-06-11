@@ -520,26 +520,10 @@ def optimal_cutoff_suggestion(sampling_freq, channel_type='BK'):
 # Fit Gaussian to histogram 
 ##############################
 
-def multi_gaussian(x, *params):
+def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
+                                 removal_method='gaussian_subtraction', removal_factor=1.0):
     """
-    Multi-gaussian function for fitting
-    params = [amp1, mean1, std1, amp2, mean2, std2, ...]
-    """
-    n_gaussians = len(params) // 3
-    y = np.zeros_like(x)
-    
-    for i in range(n_gaussians):
-        amp = params[i*3]
-        mean = params[i*3 + 1] 
-        std = params[i*3 + 2]
-        y += amp * np.exp(-0.5 * ((x - mean) / std)**2)
-    
-    return y
-
-
-def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None):
-    """
-    Automatically detect current levels by fitting multiple Gaussians to current histogram
+    Automatically detect current levels by fitting Gaussians iteratively to current histogram
     
     Parameters:
     -----------
@@ -555,6 +539,13 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     mean_guesses : list or None
         Optional list of initial guesses for the means of the Gaussians
         If provided, must have length equal to n_levels
+    removal_method : str
+        Method for removing fitted Gaussian influence:
+        - 'gaussian_subtraction': subtract fitted Gaussian from histogram
+        - 'data_masking': remove data points within N*std of fitted mean
+        - 'weighted_subtraction': subtract with weights based on Gaussian probability
+    removal_factor : float
+        Factor for removal method (e.g., N*std for masking, or subtraction strength)
         
     Returns:
     --------
@@ -571,144 +562,165 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     counts, bin_edges = np.histogram(all_currents, bins=bins, density=True)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
+    # Store original histogram for plotting
+    original_counts = counts.copy()
+    
+    # Data range for bounds
+    data_min, data_max = np.min(all_currents), np.max(all_currents)
+    data_range = data_max - data_min
+    
     # Check if valid mean guesses were provided
     using_custom_means = False
     if mean_guesses is not None:
         if len(mean_guesses) == n_levels:
             using_custom_means = True
-            selected_positions = np.array(mean_guesses)
-            print(f"Using provided mean guesses: {mean_guesses}")
+            mean_order = np.argsort(mean_guesses)  # Sort by value
+            sorted_mean_guesses = [mean_guesses[i] for i in mean_order]
+            print(f"Using provided mean guesses: {sorted_mean_guesses}")
         else:
             print(f"Warning: {len(mean_guesses)} mean guesses provided but {n_levels} levels requested.")
             print("Ignoring provided guesses and using automatic detection.")
     
-    # If no valid mean guesses provided, estimate initial parameters from histogram
-    if not using_custom_means:
-        # Use histogram peaks as initial guesses
-        
-        # Find prominent peaks in histogram
-        peaks, properties = signal.find_peaks(counts, height=np.max(counts)*0.1, distance=bins//20)
-        
-        if len(peaks) < n_levels:
-            print(f"Warning: Only found {len(peaks)} peaks, but requested {n_levels} levels")
-            print("Using evenly spaced levels as backup")
-            # Fallback: evenly spaced levels
-            data_range = np.max(all_currents) - np.min(all_currents)
-            detected_levels = [np.min(all_currents) + i * data_range / (n_levels-1) 
-                            for i in range(n_levels)]
-            return sorted(detected_levels), {}
-        
-        # Sort peaks by position and take the n_levels highest ones
-        peak_heights = counts[peaks]
-        peak_positions = bin_centers[peaks]
-        
-        # Sort by height and take top n_levels peaks
-        sorted_indices = np.argsort(peak_heights)[::-1][:n_levels]
-        selected_peaks = peaks[sorted_indices]
-        selected_positions = peak_positions[sorted_indices]
-        
-        # Sort selected peaks by position (current value)
-        position_order = np.argsort(selected_positions)
-        selected_positions = selected_positions[position_order]
-        selected_peaks = selected_peaks[position_order]
+    # Store results for each fitted Gaussian
+    fitted_gaussians = []
+    fitted_levels = []
+    working_counts = counts.copy()
+    working_data = all_currents.copy()
     
-    # Initial parameter guesses: [amp1, mean1, std1, amp2, mean2, std2, ...]
-    initial_params = []
+    fit_stats = {'amplitudes': [], 'means': [], 'stds': [], 'fit_success': True, 'r_squared_individual': []}
     
-    # Determine appropriate amplitudes and stds for the means (either provided or detected)
-    for i, mean_guess in enumerate(selected_positions):
-        # For amplitude, find closest bin if using custom means
+    # Iteratively fit Gaussians
+    for level_idx in range(n_levels):
+        print(f"\nFitting Gaussian {level_idx + 1}/{n_levels}...")
+        
+        # Determine initial guess for this level
         if using_custom_means:
+            mean_guess = sorted_mean_guesses[level_idx]
+            # Find amplitude at this mean
             closest_bin = np.argmin(np.abs(bin_centers - mean_guess))
-            amp_guess = counts[closest_bin]
+            amp_guess = working_counts[closest_bin]
         else:
-            peak_idx = selected_peaks[i]
-            amp_guess = counts[peak_idx]
+            # Find the highest peak in remaining histogram
+            if np.max(working_counts) <= 0:
+                print(f"No significant peaks remaining for level {level_idx + 1}")
+                break
+                
+            peak_idx = np.argmax(working_counts)
+            mean_guess = bin_centers[peak_idx]
+            amp_guess = working_counts[peak_idx]
         
-        std_guess = (np.max(all_currents) - np.min(all_currents)) / (n_levels * 4)  # Conservative estimate
+        # Conservative std guess
+        std_guess = data_range / (n_levels * 4)
         
-        initial_params.extend([amp_guess, mean_guess, std_guess])
-    
-    # Set parameter bounds
-    # Amplitudes: positive, means: within data range, stds: reasonable range
-    data_min, data_max = np.min(all_currents), np.max(all_currents)
-    data_range = data_max - data_min
-
-    data_max = max(data_max, np.max(selected_positions))
-    data_min = min(data_min, np.min(selected_positions))
-    
-    lower_bounds = []
-    upper_bounds = []
-    
-    for i in range(n_levels):
-        lower_bounds.extend([0, data_min, data_range/100])  # amp > 0, mean in range, std > small
-        upper_bounds.extend([np.inf, data_max, data_range/2])  # reasonable std upper limit
-    
-    try:
-        # Fit multiple Gaussians
-        popt, pcov = curve_fit(multi_gaussian, bin_centers, counts, 
-                              p0=initial_params, 
-                              bounds=(lower_bounds, upper_bounds),
-                              maxfev=100_000)
-        
-        # Extract fitted parameters
-        fitted_levels = []
-        fit_stats = {'amplitudes': [], 'means': [], 'stds': [], 'fit_success': True}
-        
-        for i in range(n_levels):
-            amp = popt[i*3]
-            mean = popt[i*3 + 1]
-            std = popt[i*3 + 2]
+        # Fit single Gaussian to current working histogram
+        try:
+            # Parameter bounds for single Gaussian
+            lower_bounds = [0, data_min - data_range*0.1, data_range/100]
+            upper_bounds = [np.inf, data_max + data_range*0.1, data_range/2]
             
-            fitted_levels.append(mean)
-            fit_stats['amplitudes'].append(amp)
-            fit_stats['means'].append(mean)
-            fit_stats['stds'].append(std)
-        
-        # Sort levels by current value
-        fitted_levels = sorted(fitted_levels)
-        
-        # Calculate R-squared
-        y_fitted = multi_gaussian(bin_centers, *popt)
-        ss_res = np.sum((counts - y_fitted) ** 2)
-        ss_tot = np.sum((counts - np.mean(counts)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-        fit_stats['r_squared'] = r_squared
-        fit_stats['fit_params'] = popt
-        
-    except Exception as e:
-        print(f"Gaussian fitting failed: {e}")
-        print("Using histogram peak positions as fallback")
-        fitted_levels = sorted(selected_positions)
-        fit_stats = {'fit_success': False, 'error': str(e)}
+            popt, pcov = curve_fit(
+                lambda x, a, m, s: a * np.exp(-0.5 * ((x - m) / s)**2),
+                bin_centers, working_counts,
+                p0=[amp_guess, mean_guess, std_guess],
+                bounds=(lower_bounds, upper_bounds),
+                maxfev=50000
+            )
+            
+            amp_fit, mean_fit, std_fit = popt
+            
+            # Store fitted parameters
+            fitted_gaussians.append(popt)
+            fitted_levels.append(mean_fit)
+            fit_stats['amplitudes'].append(amp_fit)
+            fit_stats['means'].append(mean_fit)
+            fit_stats['stds'].append(std_fit)
+            
+            # Calculate R-squared for this individual fit
+            y_fitted = amp_fit * np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+            ss_res = np.sum((working_counts - y_fitted) ** 2)
+            ss_tot = np.sum((working_counts - np.mean(working_counts)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            fit_stats['r_squared_individual'].append(r_squared)
+            
+            print(f"  Fitted: mean={mean_fit:.3f} pA, std={std_fit:.3f} pA, R²={r_squared:.3f}")
+            
+            # Remove the influence of this Gaussian for next iteration
+            if level_idx < n_levels - 1:  # Don't remove after last fit
+                if removal_method == 'gaussian_subtraction':
+                    # Subtract fitted Gaussian from histogram
+                    fitted_gaussian = amp_fit * np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+                    working_counts = np.maximum(working_counts - removal_factor * fitted_gaussian, 
+                                              np.zeros_like(working_counts))
+                    
+                elif removal_method == 'data_masking':
+                    # Remove data points within N*std of fitted mean
+                    mask = np.abs(working_data - mean_fit) > removal_factor * std_fit
+                    working_data = working_data[mask]
+                    if len(working_data) > 0:
+                        working_counts, _ = np.histogram(working_data, bins=bin_centers, density=True)
+                    else:
+                        working_counts = np.zeros_like(working_counts)
+                        
+                elif removal_method == 'weighted_subtraction':
+                    # Subtract with weights based on Gaussian probability
+                    gaussian_weights = np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+                    fitted_gaussian = amp_fit * gaussian_weights
+                    working_counts = np.maximum(working_counts - removal_factor * fitted_gaussian,
+                                              0.1 * original_counts)  # Keep some minimum
+                
+        except Exception as e:
+            print(f"  Fitting failed for level {level_idx + 1}: {e}")
+            fit_stats['fit_success'] = False
+            break
     
-    # Plot results
+    # Sort levels by current value
+    if fitted_levels:
+        sort_order = np.argsort(fitted_levels)
+        fitted_levels = [fitted_levels[i] for i in sort_order]
+        
+        # Reorder fit_stats accordingly
+        for key in ['amplitudes', 'means', 'stds', 'r_squared_individual']:
+            if key in fit_stats:
+                fit_stats[key] = [fit_stats[key][i] for i in sort_order]
+        
+        # Calculate overall R-squared using all fitted Gaussians
+        all_fitted = np.zeros_like(bin_centers)
+        for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], 
+                                                fit_stats['means'], 
+                                                fit_stats['stds'])):
+            all_fitted += amp * np.exp(-0.5 * ((bin_centers - mean) / std)**2)
+        
+        ss_res = np.sum((original_counts - all_fitted) ** 2)
+        ss_tot = np.sum((original_counts - np.mean(original_counts)) ** 2)
+        fit_stats['r_squared'] = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+    else:
+        print("No levels successfully fitted!")
+        fitted_levels = []
+        fit_stats['fit_success'] = False
+    
+    # Plot results (same as before, but using fitted parameters)
     if plot_result:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
         # Plot 1: Histogram with fitted Gaussians
-        ax1.hist(all_currents, bins=bins, density=True, alpha=0.9, color='lightblue', 
-                edgecolor='black', label='Data')
+        ax1.hist(all_currents, bins=bins, density=True, alpha=0.9, color='gray', 
+                edgecolor='white', label='Data')
         
-        if fit_stats.get('fit_success', False):
-            # Plot fitted curve
-            x_smooth = np.linspace(data_min, data_max, 1000)
-            y_fitted_smooth = multi_gaussian(x_smooth, *popt)
-            # ax1.plot(x_smooth, y_fitted_smooth, 'r-', linewidth=2, label='Fitted Gaussians')
-            
+        if fit_stats.get('fit_success', False) and fitted_levels:
             # Plot individual Gaussians
-            colors = plt.cm.Set1(np.linspace(0, 1, n_levels))
-            for i in range(n_levels):
-                amp = popt[i*3]
-                mean = popt[i*3 + 1]
-                std = popt[i*3 + 2]
-                
+            x_smooth = np.linspace(data_min, data_max, 1000)
+            colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
+            
+            for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], 
+                                                    fit_stats['means'], 
+                                                    fit_stats['stds'])):
                 individual_gaussian = amp * np.exp(-0.5 * ((x_smooth - mean) / std)**2)
                 ax1.plot(x_smooth, individual_gaussian, '-', color='red', 
                         label=f'Level {i+1}: {mean:.2f} pA')
                 ax1.axvline(mean, color=colors[i], linestyle=':', alpha=0.8)
         else:
-            # Just mark the detected levels
+            # Just mark any detected levels
             colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
             for i, level in enumerate(fitted_levels):
                 ax1.axvline(level, color=colors[i], linestyle='--', 
@@ -716,7 +728,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         
         ax1.set_xlabel('Current (pA)')
         ax1.set_ylabel('Probability Density')
-        ax1.set_title(f'Current Histogram with {n_levels} Fitted Levels')
+        ax1.set_title(f'Current Histogram with {len(fitted_levels)} Fitted Levels')
         ax1.legend(handlelength=2, handletextpad=0.5, frameon=False)
         ax1.grid(True, alpha=0.3)
         
@@ -743,16 +755,37 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         plt.show()
     
     # Print summary
-    print(f"\n=== LEVEL DETECTION RESULTS ===")
+    print(f"\n=== ITERATIVE LEVEL DETECTION RESULTS ===")
+    print(f"Method: {removal_method} (factor: {removal_factor})")
     print(f"Detected {len(fitted_levels)} current levels:")
     for i, level in enumerate(fitted_levels):
-        print(f"  Level {i}: {level:.3f} pA")
+        if i < len(fit_stats['r_squared_individual']):
+            print(f"  Level {i}: {level:.3f} pA (individual R²: {fit_stats['r_squared_individual'][i]:.3f})")
+        else:
+            print(f"  Level {i}: {level:.3f} pA")
     
     if fit_stats.get('fit_success', False):
-        print(f"Fit quality (R²): {fit_stats['r_squared']:.3f}")
+        print(f"Overall fit quality (R²): {fit_stats['r_squared']:.3f}")
         print("Standard deviations:", [f"{std:.3f}" for std in fit_stats['stds']])
     
     return fitted_levels, fit_stats
+
+
+def multi_gaussian(x, *params):
+    """
+    Sum of multiple Gaussians
+    params: [amp1, mean1, std1, amp2, mean2, std2, ...]
+    """
+    n_gaussians = len(params) // 3
+    result = np.zeros_like(x)
+    
+    for i in range(n_gaussians):
+        amp = params[i*3]
+        mean = params[i*3 + 1]
+        std = params[i*3 + 2]
+        result += amp * np.exp(-0.5 * ((x - mean) / std)**2)
+    
+    return result
 
 
 ##############################
