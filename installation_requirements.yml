@@ -16,3 +16,4 @@ dependencies:
     - pyabf
     - nptdms
     - myokit
+    - scikit-learn
