@@ -63,20 +63,20 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     ```
     cd ..
     ```
-- Now we will follow the installation instructions from the ASCAM page: (https://github.com/AGPlested/ASCAM) 
+- Now we will follow the installation instructions from the miniML page: (https://github.com/AGPlested/ASCAM) 
 
 - In the terminal, type the following commands:
     ```
-    git clone https://github.com/AGPlested/ASCAM.git
+    git clone https://github.com/delvendahl/miniML.git
     ```
-    You should see a new folder called "ASCAM" in your VSCode file window (on the left)
-- Navigate to the ASCAM folder. In the terminal, type:
+    You should see a new folder called "miniML" in your VSCode file window (on the left)
+- Use the terminal to navigate to the miniML folder, by typing (in the terminal window at thew bottom):
     ```
-    cd ASCAM
+    cd miniML
     ```
 - Install the miniML package (for miniEPCS analysis) by typing:
     ```
-    conda create --name miniML python=3.10
+    conda create --name miniML python=3.11
     ```
     ```
     conda activate miniML

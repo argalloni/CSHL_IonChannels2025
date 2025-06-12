@@ -82,30 +82,73 @@ def update_plot_defaults():
                      'text.usetex': False})
 
 
-def plot_traces(time, voltage_traces, current_traces, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
+def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
     # Plot traces in the chosen window
+    if voltage_traces is None:
+        num_subplots = 1
+    else:
+        num_subplots = 2
+    
     if ax is None:
-        fig, ax = plt.subplots(2,1, figsize=(8, 8), sharex=False, height_ratios=height_ratios)
-    ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
-    ax[0].plot(time, voltage_traces.T, color='black', linewidth=0.5)
-    ax[1].plot(time, current_traces.T, color='black', linewidth=0.8)
-    ylims0 = ax[0].get_ylim()
-    ylims1 = ax[1].get_ylim()
-    if marker_1 is not None:
-        ax[0].vlines(marker_1, *ylims0, color='red', linestyle='-', linewidth=0.5)
-        ax[1].vlines(marker_1, *ylims1, color='red', linestyle='-', linewidth=0.5)
-        ax[0].text(marker_1, ylims0[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
-        ax[1].text(marker_1, ylims1[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
-    if marker_2 is not None:
-        ax[0].vlines(marker_2, *ylims0, color='red', linestyle='-', linewidth=0.5)
-        ax[1].vlines(marker_2, *ylims1, color='red', linestyle='-', linewidth=0.5)
-        ax[0].text(marker_2, ylims0[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
-        ax[1].text(marker_2, ylims1[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
-    ax[1].set_xlabel('Time (ms)')
-    ax[1].set_ylabel('Voltage (mV)')
-    ax[0].set_ylabel('Current (pA)')
-    ax[0].set_xlim(time[0], time[-1])
-    ax[1].set_xlim(time[0], time[-1])
+        if num_subplots == 1:
+            fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+            ax = [ax]  # Make it a list for consistent indexing
+        else:
+            fig, ax = plt.subplots(2, 1, figsize=(8, 8), sharex=False, height_ratios=height_ratios)
+    else:
+        # If ax is provided, ensure it's a list
+        if not isinstance(ax, (list, np.ndarray)):
+            ax = [ax]
+    
+    # Plot voltage traces if provided (always on first subplot)
+    if voltage_traces is not None:
+        ax[0].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
+        ax[0].plot(time, voltage_traces.T, color='black', linewidth=0.5)
+        ax[0].set_ylabel('Voltage (mV)')
+        
+        # Plot current traces on second subplot
+        ax[1].plot(time, current_traces.T, color='black', linewidth=0.8)
+        ax[1].set_ylabel('Current (pA)')
+        ax[1].set_xlabel('Time (ms)')
+        
+        # Handle markers for both subplots
+        ylims0 = ax[0].get_ylim()
+        ylims1 = ax[1].get_ylim()
+        
+        if marker_1 is not None:
+            ax[0].vlines(marker_1, *ylims0, color='red', linestyle='-', linewidth=0.5)
+            ax[1].vlines(marker_1, *ylims1, color='red', linestyle='-', linewidth=0.5)
+            ax[0].text(marker_1, ylims0[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
+            ax[1].text(marker_1, ylims1[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
+        
+        if marker_2 is not None:
+            ax[0].vlines(marker_2, *ylims0, color='red', linestyle='-', linewidth=0.5)
+            ax[1].vlines(marker_2, *ylims1, color='red', linestyle='-', linewidth=0.5)
+            ax[0].text(marker_2, ylims0[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
+            ax[1].text(marker_2, ylims1[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
+        
+        ax[0].set_xlim(time[0], time[-1])
+        ax[1].set_xlim(time[0], time[-1])
+        
+    else:
+        # Plot only current traces on single subplot
+        ax[0].plot(time, current_traces.T, color='black', linewidth=0.8)
+        ax[0].set_ylabel('Current (pA)')
+        ax[0].set_xlabel('Time (ms)')
+        
+        # Handle markers for single subplot
+        ylims0 = ax[0].get_ylim()
+        
+        if marker_1 is not None:
+            ax[0].vlines(marker_1, *ylims0, color='red', linestyle='-', linewidth=0.5)
+            ax[0].text(marker_1, ylims0[1], 'marker 1', fontsize=10, color='red', ha='center', va='bottom')
+        
+        if marker_2 is not None:
+            ax[0].vlines(marker_2, *ylims0, color='red', linestyle='-', linewidth=0.5)
+            ax[0].text(marker_2, ylims0[1], 'marker 2', fontsize=10, color='red', ha='center', va='bottom')
+        
+        ax[0].set_xlim(time[0], time[-1])
+    
     return ax
 
 
