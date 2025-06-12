@@ -72,18 +72,20 @@ def time_to_index(t, sampling_freq, time_unit='ms'):
 # Plotting functions
 ###############################
 def update_plot_defaults():
-    plt.rcParams.update({'font.size': 12,
-                     'axes.spines.right': False,
-                     'axes.spines.top': False,
-                     'axes.linewidth':1.2,
-                     'xtick.major.size': 6,
-                     'xtick.major.width': 1.2,
-                     'ytick.major.size': 6,
-                     'ytick.major.width': 1.2,
-                     'legend.frameon': False,
-                     'legend.handletextpad': 0.1,
-                     'svg.fonttype': 'none',
-                     'text.usetex': False})
+    plt.rcParams.update({
+                    'font.size': 12,
+                    # 'figure.figsize': [10.0, 3.0],
+                    'axes.spines.right': False,
+                    'axes.spines.top': False,
+                    'axes.linewidth':1.2,
+                    'xtick.major.size': 6,
+                    'xtick.major.width': 1.2,
+                    'ytick.major.size': 6,
+                    'ytick.major.width': 1.2,
+                    'legend.frameon': False,
+                    'legend.handletextpad': 0.1,
+                    'svg.fonttype': 'none',
+                    'text.usetex': False})
 
 
 def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
@@ -95,10 +97,10 @@ def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker
     
     if ax is None:
         if num_subplots == 1:
-            fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+            fig, ax = plt.subplots(1, 1, figsize=(14, 6))
             ax = [ax]  # Make it a list for consistent indexing
         else:
-            fig, ax = plt.subplots(2, 1, figsize=(8, 8), sharex=False, height_ratios=height_ratios)
+            fig, ax = plt.subplots(2, 1, figsize=(14, 8), sharex=False, height_ratios=height_ratios)
     else:
         # If ax is provided, ensure it's a list
         if not isinstance(ax, (list, np.ndarray)):
