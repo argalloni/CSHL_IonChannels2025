@@ -57,11 +57,15 @@ def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, mea
     return voltage_steps, current_steps
 
 
-def time_to_index(t, sampling_freq):
+def time_to_index(t, sampling_freq, time_unit='ms'):
     """
     Convert time in milliseconds to index in the sweep, based on the sampling frequency.
     """
-    return int(t * sampling_freq / 1000)
+    if time_unit in ['ms', 'milliseconds']:
+        return int(t * sampling_freq / 1000)
+    elif time_unit in ['s', 'seconds']:
+        return int(t * sampling_freq)
+
 
 
 ###############################
@@ -109,7 +113,7 @@ def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker
         # Plot current traces on second subplot
         ax[1].plot(time, current_traces.T, color='black', linewidth=0.8)
         ax[1].set_ylabel('Current (pA)')
-        ax[1].set_xlabel('Time (ms)')
+        ax[1].set_xlabel('Time')
         
         # Handle markers for both subplots
         ylims0 = ax[0].get_ylim()
@@ -134,7 +138,7 @@ def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker
         # Plot only current traces on single subplot
         ax[0].plot(time, current_traces.T, color='black', linewidth=0.8)
         ax[0].set_ylabel('Current (pA)')
-        ax[0].set_xlabel('Time (ms)')
+        ax[0].set_xlabel('Time')
         
         # Handle markers for single subplot
         ylims0 = ax[0].get_ylim()
