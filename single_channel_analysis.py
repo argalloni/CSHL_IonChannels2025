@@ -4,9 +4,11 @@ from scipy.optimize import curve_fit
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 ##############################
 # Lowpass filter
 ##############################
+
 
 def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
     """

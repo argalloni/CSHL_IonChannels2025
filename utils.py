@@ -21,38 +21,6 @@ def get_sweeps(f):
     return swps, swp_time, 1/dt
 
 
-def abf_to_mat(f):
-    swps, swp_time, sr = get_sweeps(f)
-    mat = {'c001_Time\x00\x00\x00\xa0\x0f\x00\x00':swp_time}
-    i = 2
-    for swp in swps:
-        mat[f'c{i:03}_Ipatch\x00\xa0\x0f\x00\x00'] = swp[0]
-        i += 1
-        mat[f'c{i:03}_Piezo_Com\x00\x00'] = swp[1]
-        i += 1
-        mat[f'c{i:03}_10Vm\x00\x00\x00\xa0\x0f\x00\x00'] = swp[1]
-        i += 1
-    savemat(f[:-4]+'.mat',mat)
-
-
-def abf_to_mat_window(data_file, start_time, end_time):
-    '''
-    This function takes an .abf file and start/end times (in seconds) and returns a .mat file with the data in the window.
-    '''
-    sweeps, sweeps_time, sampling_freq = get_sweeps(data_file)
-    I, time_in_window = select_sweep_window(sweeps, sweeps_time, start_time, end_time, sampling_freq, channel=0)
-    V, time_in_window = select_sweep_window(sweeps, sweeps_time, start_time, end_time, sampling_freq, channel=1)
-    mat = {'c001_Time\x00\x00\x00\xa0\x0f\x00\x00':sweeps_time}
-    i = 2
-    for swp in sweeps:
-        mat[f'c{i:03}_Ipatch\x00\xa0\x0f\x00\x00'] = I
-        i += 1
-        mat[f'c{i:03}_Piezo_Com\x00\x00'] = V
-        i += 1
-        mat[f'c{i:03}_10Vm\x00\x00\x00\xa0\x0f\x00\x00'] = V
-        i += 1
-    savemat(f[:-4]+'.mat',mat)
-
 ###############################
 # Data processing functions
 ###############################
