@@ -57,13 +57,13 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     conda activate CSHL_IonChannels
     ```
 
-### 5. Install the "ASCAM" software for single channel analysis
+### 5. Install the "miniML" python package for miniEPSC analysis
 - In the terminal, navigate back up to the main folder (IonChannelsAnalysisCode):
     - if you are in the CSHL_IonChannels subfolder, type:
     ```
     cd ..
     ```
-- Now we will follow the installation instructions from the miniML page: (https://github.com/AGPlested/ASCAM) 
+- Now we will follow the installation instructions from the miniML page: (https://delvendahl.github.io/miniML/intro.html) 
 
 - In the terminal, type the following commands:
     ```
@@ -74,7 +74,7 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     ```
     cd miniML
     ```
-- Install the miniML package (for miniEPCS analysis) by typing:
+- Install the miniML package (for miniEPSC analysis) by typing:
     ```
     conda create --name miniML python=3.11
     ```
@@ -83,4 +83,4 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     ```
 
 
-- **Note:** miniML is only installed in the local environment called "miniML". This needs to be active in order to run miniML.
+- **Note:** miniML is only installed in the local environment called "miniML". This needs to be active in order to run miniML. When running a notebook, make sure the jupyter kernel is set to "miniML".
