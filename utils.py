@@ -97,9 +97,9 @@ def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker
     # Create or validate axes
     if ax is None:
         if has_voltage:
-            fig, ax = plt.subplots(2, 1, figsize=(12, 8), sharex=False, height_ratios=height_ratios)
+            fig, ax = plt.subplots(2, 1, figsize=(10, 8), sharex=False, height_ratios=height_ratios)
         else:
-            fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
             ax = [ax]  # Make it a list for consistent indexing
     else:
         # Ensure ax is a list for consistent indexing
