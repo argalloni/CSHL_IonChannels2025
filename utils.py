@@ -552,8 +552,8 @@ class Trace():
         
         return event_times
 
-    def get_step_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
-                            time_units: str = 's', sweep_idx: int = None):
+    def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
+                            time_units: str = 's', sweep: int = None):
         """
         Extract measurements from current and voltage data within a specified time window.
         
@@ -567,14 +567,14 @@ class Trace():
             Type of measurement to extract. Options: 'mean', 'max', 'min', 'peak'.
         time_units : str, default='s'
             Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
-        sweep_idx : int, optional
+        sweep : int, optional
             For 2D data, specify which sweep to measure. If None, measurements from all sweeps are returned.
         
         Returns
         -------
         tuple or list of tuples
-            For 1D data or when sweep_idx is specified: (current_measurement, voltage_measurement)
-            For 2D data when sweep_idx is None: list of tuples, one per sweep
+            For 1D data or when sweep is specified: (current_measurement, voltage_measurement)
+            For 2D data when sweep is None: list of tuples, one per sweep
             voltage_measurement is None if no voltage data is available.
         
         Raises
@@ -631,16 +631,18 @@ class Trace():
             current_measurement = calculate_measurement(current_window, measurement_type)
             voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None            
         else:
+            if sweep == 'all':
+                sweep = None
             # Handle 2D data (separate sweeps)
-            if sweep_idx is not None:
+            if sweep is not None:
                 # Measure specific sweep
-                if sweep_idx >= self.current_data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep_idx} exceeds number of sweeps ({self.current_data.shape[0]})")
+                if sweep >= self.current_data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({self.current_data.shape[0]})")
                 
-                current_window = self.current_data[sweep_idx, start_idx:end_idx]
+                current_window = self.current_data[sweep, start_idx:end_idx]
                 voltage_window = None
                 if self.voltage_data is not None:
-                    voltage_window = self.voltage_data[sweep_idx, start_idx:end_idx]
+                    voltage_window = self.voltage_data[sweep, start_idx:end_idx]
                 
                 current_measurement = calculate_measurement(current_window, measurement_type)
                 voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None
@@ -706,7 +708,7 @@ class Trace():
         
         try:
             # Get baseline measurements using mean values
-            baseline_current, baseline_voltage = self.get_step_measurements(
+            baseline_current, baseline_voltage = self.get_measurements(
                 start_time=start_time, 
                 end_time=end_time, 
                 measurement_type='mean', 
@@ -937,7 +939,7 @@ class Trace():
     def get_event_times(self, threshold: float, polarity: str = 'positive', 
                         time_units: str = 's', channel: str = 'current', 
                         min_distance: int = None, prominence: float = None,
-                        sweep_idx: int = None):
+                        sweep: int = None):
         """
         Find event times based on peaks above or below a threshold.
         
@@ -957,7 +959,7 @@ class Trace():
             closely spaced peaks.
         prominence : float, optional
             Required prominence of peaks. Helps filter out small fluctuations.
-        sweep_idx : int, optional
+        sweep : int, optional
             For 2D data (separate sweeps), specify which sweep to analyze. 
             If None and data is 2D, analyzes all sweeps and returns a list of arrays.
         
@@ -1031,6 +1033,8 @@ class Trace():
             if time_units in ['ms', 'milliseconds']:
                 event_times = event_times * 1000
             
+            if len(event_times) == 0:
+                print("WARNING: No events detected, double check your detection settings")
             return event_times
         
         # Handle different data structures
@@ -1040,19 +1044,18 @@ class Trace():
         
         else:
             # 2D data (separate sweeps)
-            if sweep_idx is not None:
-                # Analyze specific sweep
-                if sweep_idx >= data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep_idx} exceeds number of sweeps ({data.shape[0]})")
-                return find_events_in_trace(data[sweep_idx])
-            
-            else:
+            if sweep in ['all', None]:
                 # Analyze all sweeps
                 event_times_list = []
                 for i in range(data.shape[0]):
                     sweep_events = find_events_in_trace(data[i])
                     event_times_list.append(sweep_events)
                 return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_events_in_trace(data[sweep])
                 
     def remove_sweeps_with_spikes(self, threshold: float, polarity: str = 'positive',
                                 channel: str = 'current', min_distance: int = None,
@@ -1286,6 +1289,7 @@ class Trace():
                         filtered_data[i] = signal.sosfilt(sos, filtered_data[i])
                         
             if lowpass:
+                assert lowpass < nyq, "The lowpass cutoff frequency must be less than the Nyquist frequenct (sampling rate / 2)"
                 if savgol:
                     print('Warning: Two lowpass filters selected, Savgol filter is ignored.')
                 sos = signal.butter(order, lowpass / nyq, btype='low', analog=False, output='sos', fs=None)
