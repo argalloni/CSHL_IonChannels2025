@@ -502,56 +502,231 @@ class Trace():
                   filename=Path(filename).name, voltage_data=voltage_data, ttl_data=ttl_data,
                   concatenate_sweeps=concatenate_sweeps)
 
-    def get_ttl_events(self, threshold: float=0.5, edge: str='rising', time_units='s'):
-        '''Extract TTL event times from TTL data.
+
+    def get_step_events(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
+                        polarity: str = 'positive', time_units: str = 's', sweep: int = None):
+        '''Extract step event times from any channel data.
         
         Parameters
         ----------
-        threshold: float, default=0.5
-            Voltage threshold for detecting TTL events.
+        threshold: float
+            Threshold value for detecting step events.
+        channel: str, default='ttl'
+            Which channel to analyze ('current', 'voltage', or 'ttl').
         edge: str, default='rising'
             Type of edge to detect ('rising', 'falling', or 'both').
+        polarity: str, default='positive'
+            Step polarity to detect ('positive' for steps above threshold, 'negative' for steps below threshold).
+        time_units: str, default='s'
+            Units for returned event times ('s' or 'ms').
+        sweep: int, optional
+            For 2D data (separate sweeps), specify which sweep to analyze.
+            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
             
         Returns
         -------
-        np.ndarray
-            Array of event times in seconds.
+        np.ndarray or list of np.ndarray
+            Array of event times in specified units. For 2D data when sweep is None,
+            returns a list with one array per sweep.
             
         Raises
         ------
         ValueError
-            If no TTL data is available or invalid edge type.
+            If no data is available for the specified channel or invalid parameters.
         '''
-        if self.ttl_data is None:
-            raise ValueError("No TTL data available")
+        # Validate parameters
+        if channel not in ['current', 'voltage', 'ttl']:
+            raise ValueError("Channel must be 'current', 'voltage', or 'ttl'")
             
         if edge not in ['rising', 'falling', 'both']:
             raise ValueError("Edge must be 'rising', 'falling', or 'both'")
         
-        if self.concatenate_sweeps:
-            ttl = self.ttl_data
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("Polarity must be 'positive' or 'negative'")
+        
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
+        
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        elif channel == 'voltage':
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
+        else:  # ttl
+            if self.ttl_data is None:
+                raise ValueError("No TTL data available")
+            data = self.ttl_data
+        
+        def find_step_events_in_trace(trace_data):
+            """Helper function to find step events in a 1D trace"""
+            # Apply polarity logic to the threshold comparison
+            if polarity == 'positive':
+                above_threshold = trace_data > threshold
+            else:  # negative polarity
+                above_threshold = trace_data < threshold
+            
+            if edge == 'rising':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == 1)[0]
+            elif edge == 'falling':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == -1)[0]
+            else:  # both
+                crossings = np.where(np.abs(np.diff(above_threshold.astype(int))) == 1)[0]
+            
+            # Convert to times
+            event_times = crossings * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            return event_times
+        
+        # Handle different data structures
+        if data.ndim == 1:
+            # 1D data (concatenated sweeps)
+            return find_step_events_in_trace(data)
         else:
-            # For non-concatenated sweeps, flatten the data
-            ttl = self.ttl_data.flatten()
-        
-        # Find crossings
-        above_threshold = ttl > threshold
-        
-        if edge == 'rising':
-            crossings = np.where(np.diff(above_threshold.astype(int)) == 1)[0]
-        elif edge == 'falling':
-            crossings = np.where(np.diff(above_threshold.astype(int)) == -1)[0]
-        else:  # both
-            crossings = np.where(np.abs(np.diff(above_threshold.astype(int))) == 1)[0]
-        
-        # Convert to times
-        event_times = crossings * self.sampling
+            # 2D data (separate sweeps)
+            if sweep == 'all':
+                sweep=None
+            if sweep is None:
+                # Analyze all sweeps
+                event_times_list = []
+                for i in range(data.shape[0]):
+                    sweep_events = find_step_events_in_trace(data[i])
+                    event_times_list.append(sweep_events)
+                return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_step_events_in_trace(data[sweep])
 
-        if time_units in ['ms','milliseconds']:
-            event_times = event_times * 1000
+    def get_event_times(self, threshold: float, polarity: str = 'positive', 
+                        time_units: str = 's', channel: str = 'current', 
+                        min_distance: int = None, prominence: float = None,
+                        sweep: int = None):
+        """
+        Find event times based on peaks above or below a threshold.
         
-        return event_times
-
+        Parameters
+        ----------
+        threshold : float
+            Threshold value for peak detection. Peaks above this value (positive polarity)
+            or below this value (negative polarity) will be detected.
+        polarity : str, default='positive'
+            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
+        time_units : str, default='s'
+            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
+        channel : str, default='current'
+            Which channel to analyze. Options: 'current', 'voltage'.
+        min_distance : int, optional
+            Minimum number of samples between detected peaks. Helps avoid double-counting
+            closely spaced peaks.
+        prominence : float, optional
+            Required prominence of peaks. Helps filter out small fluctuations.
+        sweep : int, optional
+            For 2D data (separate sweeps), specify which sweep to analyze. 
+            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
+        
+        Returns
+        -------
+        numpy.ndarray or list of numpy.ndarray
+            Event times in specified units. For 2D data when sweep_idx is None,
+            returns a list with one array per sweep.
+        
+        Raises
+        ------
+        ValueError
+            If invalid parameters are provided or required data is not available.
+        ImportError
+            If scipy is not available for peak detection.
+        """
+        try:
+            from scipy.signal import find_peaks
+        except ImportError:
+            raise ImportError("scipy is required for peak detection. Please install scipy.")
+        
+        # Validate parameters
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("polarity must be 'positive' or 'negative'")
+        
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
+        
+        if channel not in ['current', 'voltage']:
+            raise ValueError("channel must be 'current' or 'voltage'")
+        
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        else:  # voltage
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
+        
+        def find_events_in_trace(trace_data):
+            """Helper function to find events in a 1D trace"""
+            if polarity == 'positive':
+                # Find peaks above threshold
+                # For positive peaks, we look for peaks in the original data
+                # and then filter by threshold
+                peak_indices, properties = find_peaks(trace_data, 
+                                                    distance=min_distance,
+                                                    prominence=prominence)
+                # Filter peaks that are above threshold
+                above_threshold = trace_data[peak_indices] >= threshold
+                event_indices = peak_indices[above_threshold]
+                
+            else:  # negative polarity
+                # Find peaks below threshold
+                # For negative peaks, we invert the data and find peaks,
+                # then filter by threshold
+                inverted_data = -trace_data
+                peak_indices, properties = find_peaks(inverted_data,
+                                                    distance=min_distance, 
+                                                    prominence=prominence)
+                # Filter peaks that are below threshold (in original data)
+                below_threshold = trace_data[peak_indices] <= threshold
+                event_indices = peak_indices[below_threshold]
+            
+            # Convert indices to times
+            event_times = event_indices * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            if len(event_times) == 0:
+                print("WARNING: No events detected, double check your detection settings")
+            return event_times
+        
+        # Handle different data structures
+        if data.ndim == 1:
+            # 1D data (concatenated sweeps)
+            return find_events_in_trace(data)
+        
+        else:
+            # 2D data (separate sweeps)
+            if sweep in ['all', None]:
+                # Analyze all sweeps
+                event_times_list = []
+                for i in range(data.shape[0]):
+                    sweep_events = find_events_in_trace(data[i])
+                    event_times_list.append(sweep_events)
+                return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_events_in_trace(data[sweep])
+           
     def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
                             time_units: str = 's', sweep: int = None):
         """
@@ -668,6 +843,8 @@ class Trace():
                 voltage_measurement = np.array(voltage_measurement)         
 
         return current_measurement, voltage_measurement
+
+
 
     def subtract_baseline(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
         """
@@ -936,127 +1113,7 @@ class Trace():
         else:  # num_plots == 3
             return current_ax, voltage_ax, ttl_ax
 
-    def get_event_times(self, threshold: float, polarity: str = 'positive', 
-                        time_units: str = 's', channel: str = 'current', 
-                        min_distance: int = None, prominence: float = None,
-                        sweep: int = None):
-        """
-        Find event times based on peaks above or below a threshold.
-        
-        Parameters
-        ----------
-        threshold : float
-            Threshold value for peak detection. Peaks above this value (positive polarity)
-            or below this value (negative polarity) will be detected.
-        polarity : str, default='positive'
-            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
-        time_units : str, default='s'
-            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
-        channel : str, default='current'
-            Which channel to analyze. Options: 'current', 'voltage'.
-        min_distance : int, optional
-            Minimum number of samples between detected peaks. Helps avoid double-counting
-            closely spaced peaks.
-        prominence : float, optional
-            Required prominence of peaks. Helps filter out small fluctuations.
-        sweep : int, optional
-            For 2D data (separate sweeps), specify which sweep to analyze. 
-            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
-        
-        Returns
-        -------
-        numpy.ndarray or list of numpy.ndarray
-            Event times in specified units. For 2D data when sweep_idx is None,
-            returns a list with one array per sweep.
-        
-        Raises
-        ------
-        ValueError
-            If invalid parameters are provided or required data is not available.
-        ImportError
-            If scipy is not available for peak detection.
-        """
-        try:
-            from scipy.signal import find_peaks
-        except ImportError:
-            raise ImportError("scipy is required for peak detection. Please install scipy.")
-        
-        # Validate parameters
-        if polarity not in ['positive', 'negative']:
-            raise ValueError("polarity must be 'positive' or 'negative'")
-        
-        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
-            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
-        
-        if channel not in ['current', 'voltage']:
-            raise ValueError("channel must be 'current' or 'voltage'")
-        
-        # Get the appropriate data
-        if channel == 'current':
-            if self.current_data is None:
-                raise ValueError("No current data available")
-            data = self.current_data
-        else:  # voltage
-            if self.voltage_data is None:
-                raise ValueError("No voltage data available")
-            data = self.voltage_data
-        
-        def find_events_in_trace(trace_data):
-            """Helper function to find events in a 1D trace"""
-            if polarity == 'positive':
-                # Find peaks above threshold
-                # For positive peaks, we look for peaks in the original data
-                # and then filter by threshold
-                peak_indices, properties = find_peaks(trace_data, 
-                                                    distance=min_distance,
-                                                    prominence=prominence)
-                # Filter peaks that are above threshold
-                above_threshold = trace_data[peak_indices] >= threshold
-                event_indices = peak_indices[above_threshold]
-                
-            else:  # negative polarity
-                # Find peaks below threshold
-                # For negative peaks, we invert the data and find peaks,
-                # then filter by threshold
-                inverted_data = -trace_data
-                peak_indices, properties = find_peaks(inverted_data,
-                                                    distance=min_distance, 
-                                                    prominence=prominence)
-                # Filter peaks that are below threshold (in original data)
-                below_threshold = trace_data[peak_indices] <= threshold
-                event_indices = peak_indices[below_threshold]
-            
-            # Convert indices to times
-            event_times = event_indices * self.sampling
-            
-            # Convert to requested units
-            if time_units in ['ms', 'milliseconds']:
-                event_times = event_times * 1000
-            
-            if len(event_times) == 0:
-                print("WARNING: No events detected, double check your detection settings")
-            return event_times
-        
-        # Handle different data structures
-        if data.ndim == 1:
-            # 1D data (concatenated sweeps)
-            return find_events_in_trace(data)
-        
-        else:
-            # 2D data (separate sweeps)
-            if sweep in ['all', None]:
-                # Analyze all sweeps
-                event_times_list = []
-                for i in range(data.shape[0]):
-                    sweep_events = find_events_in_trace(data[i])
-                    event_times_list.append(sweep_events)
-                return event_times_list
-            elif isinstance(sweep, (int, float)):
-                # Analyze specific sweep
-                if sweep >= data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
-                return find_events_in_trace(data[sweep])
-                
+     
     def remove_sweeps_with_spikes(self, threshold: float, polarity: str = 'positive',
                                 channel: str = 'current', min_distance: int = None,
                                 prominence: float = None, return_info: bool = False):
