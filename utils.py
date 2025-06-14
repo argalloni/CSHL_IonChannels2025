@@ -553,7 +553,7 @@ class Trace():
         return event_times
 
     def get_step_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
-                            units: str = 's', sweep_idx: int = None):
+                            time_units: str = 's', sweep_idx: int = None):
         """
         Extract measurements from current and voltage data within a specified time window.
         
@@ -565,7 +565,7 @@ class Trace():
             End time of the measurement window.
         measurement_type : str, default='mean'
             Type of measurement to extract. Options: 'mean', 'max', 'min', 'peak'.
-        units : str, default='s'
+        time_units : str, default='s'
             Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
         sweep_idx : int, optional
             For 2D data, specify which sweep to measure. If None, measurements from all sweeps are returned.
@@ -586,14 +586,14 @@ class Trace():
             raise ValueError("No current data available")
         
         # Convert time to seconds if needed
-        if units in ['s','seconds']:
+        if time_units in ['s','seconds']:
             start_time_s = start_time
             end_time_s = end_time
-        elif units in ['ms', 'milliseconds']:
+        elif time_units in ['ms', 'milliseconds']:
             start_time_s = start_time / 1000.0
             end_time_s = end_time / 1000.0
         else:
-            raise ValueError(f"Unknown time units: {units}. Use 's' for seconds or 'ms' for milliseconds.")
+            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
         
         if start_time_s < 0 or end_time_s > self.total_time:
             raise ValueError("Time window exceeds data bounds")
@@ -667,7 +667,7 @@ class Trace():
 
         return current_measurement, voltage_measurement
 
-    def subtract_baseline(self, start_time: float = 0, end_time: float = 1, units: str = 'ms', channel: str = 'current'):
+    def subtract_baseline(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
         """
         Subtract baseline current and voltage from the data using measurements from a specified time window.
         
@@ -677,7 +677,7 @@ class Trace():
             Start time of the baseline measurement window.
         end_time : float, default=1
             End time of the baseline measurement window.
-        units : str, default='ms'
+        time_units : str, default='ms'
             Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
         channel : str, default='current'
             Which channel(s) to apply baseline correction to. Options: 'current', 'voltage', 'all'.
@@ -710,7 +710,7 @@ class Trace():
                 start_time=start_time, 
                 end_time=end_time, 
                 measurement_type='mean', 
-                units=units
+                time_units=time_units
             )
             print("BASELINE SUBTRACTED:")
             if self.current_data.ndim == 1:
@@ -740,7 +740,7 @@ class Trace():
             raise ValueError(f"Failed to subtract baseline: {str(e)}")
 
     def plot(self, plot_voltage=False, plot_ttl=False, height_ratios=None, marker_1=None, marker_2=None, 
-            time_units='s', sweep=None):
+            time_units='s', sweep=None, plot_mean=False):
         ''' Plots the trace with optional markers
         
         Parameters
@@ -778,12 +778,7 @@ class Trace():
         markers = []
         for marker in [marker_1, marker_2]:
             if marker is not None:
-                if time_units in ['s', 'seconds']:
-                    markers.append(marker)
-                elif time_units in ['ms','milliseconds']:
-                    markers.append(marker / 1000.0)
-                else:
-                    raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
+                markers.append(marker)
             else:
                 markers.append(None)
         
@@ -853,12 +848,16 @@ class Trace():
         current_ax = axes[0]
         if not self.concatenate_sweeps and sweep == 'all':
             # Plot all sweeps with transparency
-            for i in range(self.num_sweeps):
-                current_ax.plot(time_axis, current_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
-            # Plot mean in red
-            mean_current = np.mean(current_to_plot, axis=0)
-            current_ax.plot(time_axis, mean_current, color='red', linewidth=1, label='Mean')
-            # current_ax.legend()
+            if plot_mean:
+                for i in range(self.num_sweeps):
+                    current_ax.plot(time_axis, current_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
+                # Plot mean in red
+                mean_current = np.mean(current_to_plot, axis=0)
+                current_ax.plot(time_axis, mean_current, color='red', linewidth=1, label='Mean')
+                # current_ax.legend()
+            else:
+                for i in range(self.num_sweeps):
+                    current_ax.plot(time_axis, current_to_plot[i], color='black', alpha=1, linewidth=0.5)
         else:
             current_ax.plot(time_axis, current_to_plot, color='black', linewidth=0.5)
         
@@ -870,13 +869,17 @@ class Trace():
         if has_voltage:
             voltage_ax = axes[1]
             if not self.concatenate_sweeps and sweep == 'all':
-                # Plot all sweeps with transparency
-                for i in range(self.num_sweeps):
-                    voltage_ax.plot(time_axis, voltage_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
-                # Plot mean in red
-                mean_voltage = np.mean(voltage_to_plot, axis=0)
-                voltage_ax.plot(time_axis, mean_voltage, color='red', linewidth=0.5, label='Mean')
-                # voltage_ax.legend()
+                if plot_mean:
+                    # Plot all sweeps with transparency
+                    for i in range(self.num_sweeps):
+                        voltage_ax.plot(time_axis, voltage_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
+                    # Plot mean in red
+                    mean_voltage = np.mean(voltage_to_plot, axis=0)
+                    voltage_ax.plot(time_axis, mean_voltage, color='red', linewidth=0.5, label='Mean')
+                    # voltage_ax.legend()
+                else:
+                    for i in range(self.num_sweeps):
+                        voltage_ax.plot(time_axis, voltage_to_plot[i], color='black', alpha=1., linewidth=0.5)
             else:
                 voltage_ax.plot(time_axis, voltage_to_plot, color='black', linewidth=0.5)
             
@@ -1377,7 +1380,7 @@ class Trace():
                     filename=self.filename, voltage_data=resampled_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
-    def crop(self, timepoint: float, window: float = None, units: str = 's', 
+    def crop(self, timepoint: float, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True):
         """
         Crop the trace data around specified timepoint(s) and return a new Trace object.
@@ -1389,7 +1392,7 @@ class Trace():
         window : float, optional
             The window size around the timepoint. If timepoint_2 is provided, this parameter is ignored.
             For single timepoint: data is cropped from (timepoint - window/2) to (timepoint + window/2).
-        units : str, default='s'
+        time_units : str, default='s'
             Time units for timepoint, window, and timepoint_2. Options: 's' (seconds), 'ms' (milliseconds).
         timepoint_2 : float, optional
             Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
@@ -1412,16 +1415,16 @@ class Trace():
             raise ValueError("No current data available for cropping")
         
         # Convert time units to seconds
-        if units in ['s', 'seconds']:
+        if time_units in ['s', 'seconds']:
             timepoint_s = timepoint
             window_s = window if window is not None else None
             timepoint_2_s = timepoint_2 if timepoint_2 is not None else None
-        elif units in ['ms', 'milliseconds']:
+        elif time_units in ['ms', 'milliseconds']:
             timepoint_s = timepoint / 1000.0
             window_s = window / 1000.0 if window is not None else None
             timepoint_2_s = timepoint_2 / 1000.0 if timepoint_2 is not None else None
         else:
-            raise ValueError(f"Unknown time units: {units}. Use 's' for seconds or 'ms' for milliseconds.")
+            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
         
         # Determine start and end times
         if timepoint_2_s is not None:
@@ -1476,9 +1479,9 @@ class Trace():
         
         # Create new filename indicating the crop
         if timepoint_2_s is not None:
-            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{units}"
+            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
         else:
-            crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{units}"
+            crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
         
         new_filename = self.filename.replace('.', crop_info + '.') if self.filename else f"cropped_trace{crop_info}.dat"
         
