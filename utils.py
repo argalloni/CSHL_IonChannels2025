@@ -186,6 +186,222 @@ class Trace():
 
     @classmethod
     def from_axon_file(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
+                    units: str | list=None, load_voltage: bool=False, load_ttl: bool=False,
+                    concatenate_sweeps: bool=True):
+        ''' Loads data from an AXON .abf file.
+
+        Parameters
+        ----------
+        filename: string
+            Path of a .abf file.
+        channels: int or list, default=0
+            The recording channel(s) to load. If int, loads single channel as current data.
+            If list, channels are assigned as: [current, voltage, ttl] based on load_voltage and load_ttl flags.
+        scaling: float or list, default=1.0
+            Scaling factor(s) applied to the data. If list, must match number of channels.
+        unit: str or list, default=None
+            Data unit(s), to be set when using scaling factor. If list, must match number of channels.
+        load_voltage: bool, default=False
+            Whether to load voltage data from a second channel.
+        load_ttl: bool, default=False
+            Whether to load TTL data from a third channel.
+        concatenate_sweeps: bool, default=True
+            Whether to concatenate sweeps or keep them separate.
+
+        Returns
+        -------
+        Trace
+            An initialized Trace object.
+
+        Raises
+        ------
+        Exception
+            If the file is not a valid .abf file.
+        IndexError
+            When the selected channel does not exist in the file.
+        ValueError
+            When parameters don't match the number of channels.
+        '''
+        if not Path(filename).suffix.lower() == '.abf':
+            raise Exception('Incompatible file type. Method only loads .abf files.')
+
+        import pyabf
+        abf_file = pyabf.ABF(filename)
+        
+        # Handle different input types for channels
+        if isinstance(channels, int):
+            channels_to_load = [channels]
+            if load_voltage:
+                # Only add voltage channel if it exists
+                if channels + 1 in abf_file.channelList:
+                    voltage_channel = channels + 1
+                    channels_to_load.append(voltage_channel)
+                elif len(abf_file.channelList) > 1:
+                    voltage_channel = abf_file.channelList[1]
+                    channels_to_load.append(voltage_channel)
+                # If no additional channels available, we'll try sweepC later
+            if load_ttl:
+                # Only add TTL channel if it exists
+                if channels + 2 in abf_file.channelList:
+                    ttl_channel = channels + 2
+                    channels_to_load.append(ttl_channel)
+                elif len(abf_file.channelList) > 2:
+                    ttl_channel = abf_file.channelList[-1]
+                    channels_to_load.append(ttl_channel)
+        else:
+            channels_to_load = channels
+
+        # Validate channels exist
+        for ch in channels_to_load:
+            if ch not in abf_file.channelList:
+                raise IndexError(f'Channel {ch} does not exist. Available channels: {abf_file.channelList}')
+
+        # Handle scaling and unit parameters
+        num_expected_channels = 1  # Always have current
+        if load_voltage:
+            num_expected_channels += 1
+        if load_ttl:
+            num_expected_channels += 1
+        
+        if isinstance(scaling, (int, float)):
+            scaling = [scaling] * num_expected_channels
+        elif len(scaling) != num_expected_channels:
+            raise ValueError(f"Number of scaling factors ({len(scaling)}) must match expected number of channels ({num_expected_channels})")
+
+        if units is None:
+            # Get units for available channels, fill in defaults for missing ones
+            units = []
+            for i, ch in enumerate(channels_to_load):
+                units.append(abf_file.adcUnits[ch])
+            # Add default units for voltage/TTL if they'll be loaded from sweepC
+            if load_voltage and len(units) < 2:
+                units.append('mV')
+            if load_ttl and len(units) < 3:
+                units.append('V')
+        elif isinstance(units, str):
+            units = [units] * num_expected_channels
+        elif len(units) != num_expected_channels:
+            raise ValueError(f"Number of units ({len(units)}) must match expected number of channels ({num_expected_channels})")
+
+        # Load data - handle multiple sweeps
+        if concatenate_sweeps:
+            # Original behavior - concatenate all sweeps
+            current_data = abf_file.data[channels_to_load[0]] * scaling[0]
+            voltage_data = None
+            ttl_data = None
+            
+            # Try to load voltage data from specified channel first
+            if load_voltage and len(channels_to_load) > 1:
+                try:
+                    voltage_data = abf_file.data[channels_to_load[1]] * scaling[1]
+                except (IndexError, KeyError):
+                    # If channel approach fails, try sweepC
+                    print(f"Warning: Could not load voltage from channel {channels_to_load[1]}, trying sweepC...")
+                    voltage_data = None
+            
+            # Fallback: Check for voltage in sweepC if requested but not found
+            if load_voltage and voltage_data is None:
+                try:
+                    abf_file.setSweep(0)  # Set to first sweep to access sweepC
+                    if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
+                        # For concatenated sweeps, we need to collect sweepC from all sweeps
+                        all_voltage_data = []
+                        for sweep_idx in range(abf_file.sweepCount):
+                            abf_file.setSweep(sweep_idx)
+                            if abf_file.sweepC is not None:
+                                sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
+                                all_voltage_data.append(abf_file.sweepC * sweep_scaling)
+                        
+                        if all_voltage_data:
+                            voltage_data = np.concatenate(all_voltage_data)
+                            print("Successfully loaded voltage data from sweepC")
+                except Exception as e:
+                    print(f"Warning: Could not load voltage from sweepC: {e}")
+            
+            # Load TTL data
+            if load_ttl and len(channels_to_load) > 2:
+                try:
+                    ttl_data = abf_file.data[channels_to_load[2]] * scaling[2]
+                except (IndexError, KeyError):
+                    print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
+                    
+        else:
+            # New behavior - keep sweeps separate
+            abf_file.setSweep(0)  # Start with first sweep to get dimensions
+            sweep_length = len(abf_file.sweepY)
+            num_sweeps = abf_file.sweepCount
+            
+            # Initialize arrays for all sweeps
+            current_data = np.zeros((num_sweeps, sweep_length))
+            voltage_data = None
+            ttl_data = None
+            
+            if load_voltage:
+                voltage_data = np.zeros((num_sweeps, sweep_length))
+            if load_ttl:
+                ttl_data = np.zeros((num_sweeps, sweep_length))
+            
+            # Load each sweep
+            for sweep_idx in range(num_sweeps):
+                # Load current data
+                abf_file.setSweep(sweep_idx, channel=channels_to_load[0])
+                current_data[sweep_idx] = abf_file.sweepY * scaling[0]
+                
+                # Load voltage data
+                if load_voltage:
+                    voltage_loaded = False
+                    
+                    # Try loading from specified channel first
+                    if len(channels_to_load) > 1:
+                        try:
+                            abf_file.setSweep(sweep_idx, channel=channels_to_load[1])
+                            voltage_data[sweep_idx] = abf_file.sweepY * scaling[1]
+                            voltage_loaded = True
+                        except (IndexError, KeyError):
+                            pass
+                    
+                    # Fallback to sweepC if channel approach failed
+                    if not voltage_loaded:
+                        try:
+                            abf_file.setSweep(sweep_idx, channel=channels_to_load[0])  # Reset to current channel
+                            if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
+                                sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
+                                voltage_data[sweep_idx] = abf_file.sweepC * sweep_scaling
+                                voltage_loaded = True
+                        except Exception:
+                            pass
+                    
+                    # If still no voltage data, warn user
+                    if not voltage_loaded and sweep_idx == 0:  # Only warn once
+                        print("Warning: Could not load voltage data from any source")
+                        voltage_data = None
+                        break
+                        
+                # Load TTL data
+                if load_ttl and len(channels_to_load) > 2:
+                    try:
+                        abf_file.setSweep(sweep_idx, channel=channels_to_load[2])
+                        ttl_data[sweep_idx] = abf_file.sweepY * scaling[2]
+                    except (IndexError, KeyError):
+                        if sweep_idx == 0:  # Only warn once
+                            print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
+                            ttl_data = None
+                            break
+        
+        # Set units
+        current_unit = units[0]
+        voltage_unit = units[1] if len(units) > 1 else 'mV'
+        ttl_unit = units[2] if len(units) > 2 else 'V'
+
+        return cls(current_data=current_data, sampling_interval=1/abf_file.sampleRate, 
+                current_unit=current_unit, filename=Path(filename).name,
+                voltage_data=voltage_data, voltage_unit=voltage_unit,
+                ttl_data=ttl_data, ttl_unit=ttl_unit,
+                concatenate_sweeps=concatenate_sweeps)
+
+
+    @classmethod
+    def from_axon_file_old(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
                        units: str | list=None, load_voltage: bool=False, load_ttl: bool=False,
                        concatenate_sweeps: bool=True):
         ''' Loads data from an AXON .abf file.
@@ -231,7 +447,7 @@ class Trace():
         # Handle different input types for channels
         if isinstance(channels, int):
             channels_to_load = [channels]
-            if load_voltage:
+            if load_voltage:                
                 voltage_channel = channels + 1 if channels + 1 in abf_file.channelList else abf_file.channelList[1]
                 channels_to_load.append(voltage_channel)
             if load_ttl:
