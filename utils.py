@@ -57,7 +57,7 @@ class Trace():
     def __init__(self, current_data: np.ndarray | list=None, sampling_interval: float=1, current_unit: str='', 
                  filename: str='', voltage_data: np.ndarray | list=None, voltage_unit: str='', 
                  ttl_data: np.ndarray | list=None, ttl_unit: str='V',
-                 concatenate_sweeps: bool=True):
+                 concatenate_sweeps: bool=False):
         self.current_data = current_data
         self.voltage_data = voltage_data
         self.ttl_data = ttl_data
@@ -186,8 +186,307 @@ class Trace():
 
     @classmethod
     def from_axon_file(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
+                    units: str | list=None, load_voltage: bool=True, load_ttl: bool=False,
+                    concatenate_sweeps: bool=False, recording_mode: str="V clamp"):
+        ''' Loads data from an AXON .abf file.
+
+        Parameters
+        ----------
+        filename: string
+            Path of a .abf file.
+        channels: int or list, default=0
+            The recording channel(s) to load. If int, loads single channel as current data.
+            If list, channels are assigned as: [current, voltage, ttl] based on load_voltage and load_ttl flags.
+        scaling: float or list, default=1.0
+            Scaling factor(s) applied to the data. If list, must match number of channels.
+        unit: str or list, default=None
+            Data unit(s), to be set when using scaling factor. If list, must match number of channels.
+        load_voltage: bool, default=False
+            Whether to load voltage data from a second channel.
+        load_ttl: bool, default=False
+            Whether to load TTL data from a third channel.
+        concatenate_sweeps: bool, default=True
+            Whether to concatenate sweeps or keep them separate.
+        recording_mode: str, default="V clamp"
+            Recording mode: "V clamp" (voltage clamp) or "I clamp" (current clamp).
+            In V clamp: sweepY=current, sweepC=voltage
+            In I clamp: sweepY=voltage, sweepC=current
+
+        Returns
+        -------
+        Trace
+            An initialized Trace object.
+
+        Raises
+        ------
+        Exception
+            If the file is not a valid .abf file.
+        IndexError
+            When the selected channel does not exist in the file.
+        ValueError
+            When parameters don't match the number of channels or invalid recording_mode.
+        '''
+        if not Path(filename).suffix.lower() == '.abf':
+            raise Exception('Incompatible file type. Method only loads .abf files.')
+
+        # Validate recording_mode
+        valid_modes = ["V clamp", "I clamp", "voltage clamp", "current clamp"]
+        if recording_mode not in valid_modes:
+            raise ValueError(f"Invalid recording_mode '{recording_mode}'. Must be one of: {valid_modes}")
+        
+        # Normalize recording mode
+        is_current_clamp = recording_mode.lower() in ["i clamp", "current clamp"]
+
+        import pyabf
+        abf_file = pyabf.ABF(filename)
+        
+        # Handle different input types for channels
+        if isinstance(channels, int):
+            channels_to_load = [channels]
+            if load_voltage:
+                # Only add voltage channel if it exists
+                if channels + 1 in abf_file.channelList:
+                    voltage_channel = channels + 1
+                    channels_to_load.append(voltage_channel)
+                elif len(abf_file.channelList) > 1:
+                    voltage_channel = abf_file.channelList[1]
+                    channels_to_load.append(voltage_channel)
+                # If no additional channels available, we'll try sweepC later
+            if load_ttl:
+                # Only add TTL channel if it exists
+                if channels + 2 in abf_file.channelList:
+                    ttl_channel = channels + 2
+                    channels_to_load.append(ttl_channel)
+                elif len(abf_file.channelList) > 2:
+                    ttl_channel = abf_file.channelList[-1]
+                    channels_to_load.append(ttl_channel)
+        else:
+            channels_to_load = channels
+
+        # Validate channels exist
+        for ch in channels_to_load:
+            if ch not in abf_file.channelList:
+                raise IndexError(f'Channel {ch} does not exist. Available channels: {abf_file.channelList}')
+
+        # Handle scaling and unit parameters
+        num_expected_channels = 1  # Always have current
+        if load_voltage:
+            num_expected_channels += 1
+        if load_ttl:
+            num_expected_channels += 1
+        
+        if isinstance(scaling, (int, float)):
+            scaling = [scaling] * num_expected_channels
+        elif len(scaling) != num_expected_channels:
+            raise ValueError(f"Number of scaling factors ({len(scaling)}) must match expected number of channels ({num_expected_channels})")
+
+        if units is None:
+            # Get units for available channels, fill in defaults for missing ones
+            units = []
+            for i, ch in enumerate(channels_to_load):
+                units.append(abf_file.adcUnits[ch])
+            # Add default units for voltage/TTL if they'll be loaded from sweepC
+            if load_voltage and len(units) < 2:
+                units.append('mV' if not is_current_clamp else 'pA')  # voltage in I clamp, current in V clamp
+            if load_ttl and len(units) < 3:
+                units.append('V')
+        elif isinstance(units, str):
+            units = [units] * num_expected_channels
+        elif len(units) != num_expected_channels:
+            raise ValueError(f"Number of units ({len(units)}) must match expected number of channels ({num_expected_channels})")
+
+        # Load data - handle multiple sweeps
+        if concatenate_sweeps:
+            # Original behavior - concatenate all sweeps
+            if is_current_clamp:
+                # In current clamp: sweepY=voltage, sweepC=current
+                # But we want current_data to contain current, so we need to get it from sweepC or another channel
+                current_data = None
+                voltage_data = None
+                
+                # Try to get current data from specified channel first
+                if len(channels_to_load) > 0:
+                    try:
+                        # Check if the primary channel actually contains current data
+                        primary_data = abf_file.data[channels_to_load[0]] * scaling[0]
+                        # In current clamp, if we're loading from the primary channel, it's likely voltage
+                        # We'll assume the user knows what they're doing with explicit channel specification
+                        current_data = primary_data
+                    except (IndexError, KeyError):
+                        pass
+                
+                # If no explicit current channel or load_voltage is True, try to get current from sweepC
+                if current_data is None or load_voltage:
+                    try:
+                        # Collect current data (sweepC) from all sweeps
+                        all_current_data = []
+                        all_voltage_data = []
+                        
+                        for sweep_idx in range(abf_file.sweepCount):
+                            abf_file.setSweep(sweep_idx)
+                            
+                            # In current clamp: sweepY=voltage, sweepC=current
+                            voltage_sweep = abf_file.sweepY * (scaling[1] if load_voltage and len(scaling) > 1 else 1.0)
+                            all_voltage_data.append(voltage_sweep)
+                            
+                            if abf_file.sweepC is not None:
+                                current_sweep = abf_file.sweepC * scaling[0]
+                                all_current_data.append(current_sweep)
+                        
+                        if all_current_data:
+                            current_data = np.concatenate(all_current_data)
+                            if load_voltage:
+                                voltage_data = np.concatenate(all_voltage_data)
+                                
+                    except Exception as e:
+                        print(f"Warning: Could not load current/voltage data in current clamp mode: {e}")
+                        # Fallback to treating primary channel as current
+                        current_data = abf_file.data[channels_to_load[0]] * scaling[0]
+                
+            else:
+                # Voltage clamp mode - original behavior
+                current_data = abf_file.data[channels_to_load[0]] * scaling[0]
+                voltage_data = None
+                
+                # Try to load voltage data from specified channel first
+                if load_voltage and len(channels_to_load) > 1:
+                    try:
+                        voltage_data = abf_file.data[channels_to_load[1]] * scaling[1]
+                    except (IndexError, KeyError):
+                        print(f"Warning: Could not load voltage from channel {channels_to_load[1]}, trying sweepC...")
+                        voltage_data = None
+                
+                # Fallback: Check for voltage in sweepC if requested but not found
+                if load_voltage and voltage_data is None:
+                    try:
+                        all_voltage_data = []
+                        for sweep_idx in range(abf_file.sweepCount):
+                            abf_file.setSweep(sweep_idx)
+                            if abf_file.sweepC is not None:
+                                sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
+                                all_voltage_data.append(abf_file.sweepC * sweep_scaling)
+                        
+                        if all_voltage_data:
+                            voltage_data = np.concatenate(all_voltage_data)
+                            print("Successfully loaded voltage data from sweepC")
+                    except Exception as e:
+                        print(f"Warning: Could not load voltage from sweepC: {e}")
+            
+            # Load TTL data (same for both modes)
+            ttl_data = None
+            if load_ttl and len(channels_to_load) > 2:
+                try:
+                    ttl_data = abf_file.data[channels_to_load[2]] * scaling[2]
+                except (IndexError, KeyError):
+                    print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
+                    
+        else:
+            # New behavior - keep sweeps separate
+            abf_file.setSweep(0)  # Start with first sweep to get dimensions
+            sweep_length = len(abf_file.sweepY)
+            num_sweeps = abf_file.sweepCount
+            
+            # Initialize arrays for all sweeps
+            current_data = np.zeros((num_sweeps, sweep_length))
+            voltage_data = None
+            ttl_data = None
+            
+            if load_voltage:
+                voltage_data = np.zeros((num_sweeps, sweep_length))
+            if load_ttl:
+                ttl_data = np.zeros((num_sweeps, sweep_length))
+            
+            # Load each sweep
+            for sweep_idx in range(num_sweeps):
+                if is_current_clamp:
+                    # In current clamp: sweepY=voltage, sweepC=current
+                    abf_file.setSweep(sweep_idx, channel=channels_to_load[0])
+                    
+                    # Try to get current from sweepC first
+                    current_loaded = False
+                    if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
+                        current_data[sweep_idx] = abf_file.sweepC * scaling[0]
+                        current_loaded = True
+                    
+                    # If sweepC not available, use primary channel (might be incorrectly assigned)
+                    if not current_loaded:
+                        current_data[sweep_idx] = abf_file.sweepY * scaling[0]
+                        if sweep_idx == 0:
+                            print("Warning: Using primary channel for current in current clamp mode - data might be swapped")
+                    
+                    # Load voltage data
+                    if load_voltage:
+                        # In current clamp, voltage is typically in sweepY
+                        voltage_data[sweep_idx] = abf_file.sweepY * (scaling[1] if len(scaling) > 1 else 1.0)
+                        
+                else:
+                    # Voltage clamp mode - original behavior
+                    abf_file.setSweep(sweep_idx, channel=channels_to_load[0])
+                    current_data[sweep_idx] = abf_file.sweepY * scaling[0]
+                    
+                    # Load voltage data
+                    if load_voltage:
+                        voltage_loaded = False
+                        
+                        # Try loading from specified channel first
+                        if len(channels_to_load) > 1:
+                            try:
+                                abf_file.setSweep(sweep_idx, channel=channels_to_load[1])
+                                voltage_data[sweep_idx] = abf_file.sweepY * scaling[1]
+                                voltage_loaded = True
+                            except (IndexError, KeyError):
+                                pass
+                        
+                        # Fallback to sweepC if channel approach failed
+                        if not voltage_loaded:
+                            try:
+                                abf_file.setSweep(sweep_idx, channel=channels_to_load[0])  # Reset to current channel
+                                if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
+                                    sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
+                                    voltage_data[sweep_idx] = abf_file.sweepC * sweep_scaling
+                                    voltage_loaded = True
+                            except Exception:
+                                pass
+                        
+                        # If still no voltage data, warn user
+                        if not voltage_loaded and sweep_idx == 0:  # Only warn once
+                            print("Warning: Could not load voltage data from any source")
+                            voltage_data = None
+                            break
+                            
+                # Load TTL data (same for both modes)
+                if load_ttl and len(channels_to_load) > 2:
+                    try:
+                        abf_file.setSweep(sweep_idx, channel=channels_to_load[2])
+                        ttl_data[sweep_idx] = abf_file.sweepY * scaling[2]
+                    except (IndexError, KeyError):
+                        if sweep_idx == 0:  # Only warn once
+                            print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
+                            ttl_data = None
+                            break
+        
+        # Set units based on recording mode
+        if is_current_clamp:
+            # In current clamp: current_data contains current, voltage_data contains voltage
+            current_unit = units[0] if 'A' in units[0] or 'pA' in units[0] else 'pA'  # Default current unit
+            voltage_unit = units[1] if len(units) > 1 and ('V' in units[1] or 'mV' in units[1]) else 'mV'  # Default voltage unit
+        else:
+            # In voltage clamp: current_data contains current, voltage_data contains voltage
+            current_unit = units[0]
+            voltage_unit = units[1] if len(units) > 1 else 'mV'
+        
+        ttl_unit = units[2] if len(units) > 2 else 'V'
+
+        return cls(current_data=current_data, sampling_interval=1/abf_file.sampleRate, 
+                current_unit=current_unit, filename=Path(filename).name,
+                voltage_data=voltage_data, voltage_unit=voltage_unit,
+                ttl_data=ttl_data, ttl_unit=ttl_unit,
+                concatenate_sweeps=concatenate_sweeps)
+
+    @classmethod
+    def from_axon_file2(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
                     units: str | list=None, load_voltage: bool=False, load_ttl: bool=False,
-                    concatenate_sweeps: bool=True):
+                    concatenate_sweeps: bool=False):
         ''' Loads data from an AXON .abf file.
 
         Parameters
@@ -399,131 +698,6 @@ class Trace():
                 ttl_data=ttl_data, ttl_unit=ttl_unit,
                 concatenate_sweeps=concatenate_sweeps)
 
-
-    @classmethod
-    def from_axon_file_old(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
-                       units: str | list=None, load_voltage: bool=False, load_ttl: bool=False,
-                       concatenate_sweeps: bool=True):
-        ''' Loads data from an AXON .abf file.
-
-        Parameters
-        ----------
-        filename: string
-            Path of a .abf file.
-        channels: int or list, default=0
-            The recording channel(s) to load. If int, loads single channel as current data.
-            If list, channels are assigned as: [current, voltage, ttl] based on load_voltage and load_ttl flags.
-        scaling: float or list, default=1.0
-            Scaling factor(s) applied to the data. If list, must match number of channels.
-        unit: str or list, default=None
-            Data unit(s), to be set when using scaling factor. If list, must match number of channels.
-        load_voltage: bool, default=False
-            Whether to load voltage data from a second channel.
-        load_ttl: bool, default=False
-            Whether to load TTL data from a third channel.
-        concatenate_sweeps: bool, default=True
-            Whether to concatenate sweeps or keep them separate.
-
-        Returns
-        -------
-        Trace
-            An initialized Trace object.
-
-        Raises
-        ------
-        Exception
-            If the file is not a valid .abf file.
-        IndexError
-            When the selected channel does not exist in the file.
-        ValueError
-            When parameters don't match the number of channels.
-        '''
-        if not Path(filename).suffix.lower() == '.abf':
-            raise Exception('Incompatible file type. Method only loads .abf files.')
-
-        import pyabf
-        abf_file = pyabf.ABF(filename)
-        
-        # Handle different input types for channels
-        if isinstance(channels, int):
-            channels_to_load = [channels]
-            if load_voltage:                
-                voltage_channel = channels + 1 if channels + 1 in abf_file.channelList else abf_file.channelList[1]
-                channels_to_load.append(voltage_channel)
-            if load_ttl:
-                ttl_channel = channels + 2 if channels + 2 in abf_file.channelList else abf_file.channelList[-1]
-                channels_to_load.append(ttl_channel)
-        else:
-            channels_to_load = channels
-
-        # Validate channels exist
-        for ch in channels_to_load:
-            if ch not in abf_file.channelList:
-                raise IndexError(f'Channel {ch} does not exist. Available channels: {abf_file.channelList}')
-
-        # Handle scaling and unit parameters
-        if isinstance(scaling, (int, float)):
-            scaling = [scaling] * len(channels_to_load)
-        elif len(scaling) != len(channels_to_load):
-            raise ValueError("Number of scaling factors must match number of channels")
-
-        if units is None:
-            units = [abf_file.adcUnits[ch] for ch in channels_to_load]
-        elif isinstance(units, str):
-            units = [units] * len(channels_to_load)
-        elif len(units) != len(channels_to_load):
-            raise ValueError("Number of units must match number of channels")
-
-        # Load data - handle multiple sweeps
-        if concatenate_sweeps:
-            # Original behavior - concatenate all sweeps
-            current_data = abf_file.data[channels_to_load[0]] * scaling[0]
-            voltage_data = None
-            ttl_data = None
-            
-            if len(channels_to_load) > 1:
-                voltage_data = abf_file.data[channels_to_load[1]] * scaling[1]
-            if len(channels_to_load) > 2:
-                ttl_data = abf_file.data[channels_to_load[2]] * scaling[2]
-        else:
-            # New behavior - keep sweeps separate
-            abf_file.setSweep(0)  # Start with first sweep to get dimensions
-            sweep_length = len(abf_file.sweepY)
-            num_sweeps = abf_file.sweepCount
-            
-            # Initialize arrays for all sweeps
-            current_data = np.zeros((num_sweeps, sweep_length))
-            voltage_data = None
-            ttl_data = None
-            
-            if len(channels_to_load) > 1:
-                voltage_data = np.zeros((num_sweeps, sweep_length))
-            if len(channels_to_load) > 2:
-                ttl_data = np.zeros((num_sweeps, sweep_length))
-            
-            # Load each sweep
-            for sweep_idx in range(num_sweeps):
-                abf_file.setSweep(sweep_idx, channel=channels_to_load[0])
-                current_data[sweep_idx] = abf_file.sweepY * scaling[0]
-                
-                if len(channels_to_load) > 1:
-                    abf_file.setSweep(sweep_idx, channel=channels_to_load[1])
-                    voltage_data[sweep_idx] = abf_file.sweepY * scaling[1]
-                    
-                if len(channels_to_load) > 2:
-                    abf_file.setSweep(sweep_idx, channel=channels_to_load[2])
-                    ttl_data[sweep_idx] = abf_file.sweepY * scaling[2]
-        
-        current_unit = units[0]
-        voltage_unit = units[1] if len(units) > 1 else 'mV'
-        ttl_unit = units[2] if len(units) > 2 else 'V'
-
-        return cls(current_data=current_data, sampling_interval=1/abf_file.sampleRate, 
-                   current_unit=current_unit, filename=Path(filename).name,
-                   voltage_data=voltage_data, voltage_unit=voltage_unit,
-                   ttl_data=ttl_data, ttl_unit=ttl_unit,
-                   concatenate_sweeps=concatenate_sweeps)
-
     @classmethod
     def from_heka_file(cls, filename: str, rectype: str, group: int=0, load_series: list=[], exclude_series: list=[], 
                        exclude_sweeps: dict={}, scaling: float=1, unit: str=None, resample: bool=True,
@@ -718,6 +892,159 @@ class Trace():
                   filename=Path(filename).name, voltage_data=voltage_data, ttl_data=ttl_data,
                   concatenate_sweeps=concatenate_sweeps)
 
+    def crop(self, timepoint: float, window: float = None, time_units: str = 's', 
+            timepoint_2: float = None, preserve_metadata: bool = True):
+        """
+        Crop the trace data around specified timepoint(s) and return a new Trace object.
+        
+        Parameters
+        ----------
+        timepoint : float
+            The center timepoint for cropping (or start timepoint if timepoint_2 is provided).
+        window : float, optional
+            The window size around the timepoint. If timepoint_2 is provided, this parameter is ignored.
+            For single timepoint: data is cropped from (timepoint - window/2) to (timepoint + window/2).
+        time_units : str, default='s'
+            Time units for timepoint, window, and timepoint_2. Options: 's' (seconds), 'ms' (milliseconds).
+        timepoint_2 : float, optional
+            Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
+            The window parameter is ignored when this is specified.
+        preserve_metadata : bool, default=True
+            Whether to preserve metadata (events, excluded_sweeps, etc.) in the new Trace object.
+        
+        Returns
+        -------
+        Trace
+            A new Trace object containing the cropped data.
+        
+        Raises
+        ------
+        ValueError
+            If no current data is available, if timepoints are out of bounds, if window is invalid,
+            or if time units are not recognized.
+        """
+        if self.current_data is None:
+            raise ValueError("No current data available for cropping")
+        
+        # Convert time units to seconds
+        if time_units in ['s', 'seconds']:
+            timepoint_s = timepoint
+            window_s = window if window is not None else None
+            timepoint_2_s = timepoint_2 if timepoint_2 is not None else None
+        elif time_units in ['ms', 'milliseconds']:
+            timepoint_s = timepoint / 1000.0
+            window_s = window / 1000.0 if window is not None else None
+            timepoint_2_s = timepoint_2 / 1000.0 if timepoint_2 is not None else None
+        else:
+            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
+        
+        # Determine start and end times
+        if timepoint_2_s is not None:
+            # Crop between two timepoints
+            start_time = min(timepoint_s, timepoint_2_s)
+            end_time = max(timepoint_s, timepoint_2_s)
+        else:
+            # Crop around single timepoint with window
+            if window_s is None:
+                raise ValueError("Either 'window' or 'timepoint_2' must be specified")
+            if window_s <= 0:
+                raise ValueError("Window size must be positive")
+            
+            start_time = timepoint_s
+            end_time = timepoint_s + window_s
+        
+        # Validate time bounds
+        if start_time < 0:
+            raise ValueError(f"Start time ({start_time:.6f} s) is before data start (0 s)")
+        if end_time > self.total_time:
+            raise ValueError(f"End time ({end_time:.6f} s) exceeds data duration ({self.total_time:.6f} s)")
+        if start_time >= end_time:
+            raise ValueError("Start time must be less than end time")
+        
+        # Convert times to sample indices
+        start_idx = int(start_time / self.sampling)
+        end_idx = int(end_time / self.sampling)
+        
+        # Ensure we don't exceed array bounds
+        if self.concatenate_sweeps:
+            max_idx = len(self.current_data)
+        else:
+            max_idx = self.current_data.shape[1]
+        
+        start_idx = max(0, start_idx)
+        end_idx = min(max_idx, end_idx)
+        
+        if start_idx >= end_idx:
+            raise ValueError("Invalid time window results in empty data")
+        
+        # Crop the data
+        if self.concatenate_sweeps:
+            # Handle 1D data (concatenated sweeps)
+            cropped_current = self.current_data[start_idx:end_idx]
+            cropped_voltage = self.voltage_data[start_idx:end_idx] if self.voltage_data is not None else None
+            cropped_ttl = self.ttl_data[start_idx:end_idx] if self.ttl_data is not None else None
+        else:
+            # Handle 2D data (separate sweeps)
+            cropped_current = self.current_data[:, start_idx:end_idx]
+            cropped_voltage = self.voltage_data[:, start_idx:end_idx] if self.voltage_data is not None else None
+            cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
+        
+        # Create new filename indicating the crop
+        if timepoint_2_s is not None:
+            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
+        else:
+            crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
+        
+        new_filename = self.filename.replace('.', crop_info + '.') if self.filename else f"cropped_trace{crop_info}.dat"
+        
+        # Create new Trace object
+        cropped_trace = Trace(
+            current_data=cropped_current,
+            sampling_interval=self.sampling,
+            current_unit=self.current_unit,
+            filename=new_filename,
+            voltage_data=cropped_voltage,
+            voltage_unit=self.voltage_unit,
+            ttl_data=cropped_ttl,
+            ttl_unit=self.ttl_unit,
+            concatenate_sweeps=self.concatenate_sweeps
+        )
+        
+        # Preserve metadata if requested
+        if preserve_metadata:
+            # Copy events if they exist and adjust their timing
+            if hasattr(self, 'events') and len(self.events) > 0:
+                # Filter events that fall within the cropped time window
+                # and adjust their timing relative to the new start
+                original_events = np.array(self.events)
+                if original_events.size > 0:
+                    # Assuming events are stored as [time, ...] format
+                    if original_events.ndim == 1:
+                        event_times = original_events
+                    else:
+                        event_times = original_events[:, 0]  # Assume first column is time
+                    
+                    # Convert to seconds if needed
+                    event_times_s = event_times * self.sampling  # Convert from sample indices to seconds
+                    
+                    # Find events within the cropped window
+                    mask = (event_times_s >= start_time) & (event_times_s < end_time)
+                    if np.any(mask):
+                        cropped_events = original_events[mask] if original_events.ndim > 1 else original_events[mask]
+                        # Adjust timing - subtract the start time and convert back to sample indices
+                        if cropped_events.size > 0:
+                            if cropped_events.ndim == 1:
+                                cropped_events = cropped_events - start_idx
+                            else:
+                                cropped_events[:, 0] = cropped_events[:, 0] - start_idx
+                            cropped_trace.events = cropped_events
+            
+            # Copy other metadata attributes if they exist
+            for attr in ['excluded_sweeps', 'excluded_series', 'Rseries']:
+                if hasattr(self, attr):
+                    setattr(cropped_trace, attr, getattr(self, attr))
+        
+        return cropped_trace
 
     def get_step_events(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
                         polarity: str = 'positive', time_units: str = 's', sweep: int = None):
@@ -1060,8 +1387,6 @@ class Trace():
 
         return current_measurement, voltage_measurement
 
-
-
     def subtract_baseline(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
         """
         Subtract baseline current and voltage from the data using measurements from a specified time window.
@@ -1134,22 +1459,23 @@ class Trace():
         except Exception as e:
             raise ValueError(f"Failed to subtract baseline: {str(e)}")
 
-    def plot(self, plot_voltage=False, plot_ttl=False, height_ratios=None, marker_1=None, marker_2=None, 
-            time_units='s', sweep=None, plot_mean=False):
+    def plot(self, plot_current=True, plot_voltage=False, plot_ttl=False, height_ratios=None, 
+            marker_1=None, marker_2=None, time_units='s', sweep=None, plot_mean=False):
         ''' Plots the trace with optional markers
         
         Parameters
         ----------
+        plot_current: bool, default=True
+            Whether to plot current data (if available).
         plot_voltage: bool, default=False
             Whether to plot voltage data as well (if available).
         plot_ttl: bool, default=False
             Whether to plot TTL data as well (if available).
         height_ratios: tuple, default=None
             Height ratios for subplots. If None, defaults based on number of plots:
-            - Current only: N/A
-            - Current + Voltage: (3, 1)
-            - Current + TTL: (3, 1)
-            - Current + Voltage + TTL: (3, 1, 1)
+            - Single plot: N/A
+            - Two plots: (3, 1) or (1, 1) if both are non-current
+            - Three plots: (3, 1, 1) if current included, (1, 1, 1) if current not included
         marker_1: float, default=None
             Time position for first marker. If provided, adds a vertical line at this position.
         marker_2: float, default=None
@@ -1159,15 +1485,55 @@ class Trace():
         sweep: int, 'all', or None, default=None
             Which sweep to plot if data is not concatenated. If None, plots first sweep.
             If 'all', plots all sweeps superimposed with mean in red.
+        plot_mean: bool, default=False
+            Whether to plot the mean trace in red when sweep='all'.
         
         Returns
         -------
         matplotlib.axes or tuple of matplotlib.axes
-            Single axis if only current plotted, tuple of axes if multiple plots.
-            Order: (current_ax, voltage_ax, ttl_ax) depending on what's plotted.
+            Single axis if only one channel plotted, tuple of axes if multiple plots.
+            Order depends on which channels are plotted.
+            
+        Raises
+        ------
+        ValueError
+            If no channels are selected for plotting or if required data is not available.
         '''
-        if self.current_data is None:
-            raise ValueError("No data to plot")
+        # Check that at least one channel is selected for plotting
+        if not any([plot_current, plot_voltage, plot_ttl]):
+            raise ValueError("At least one channel must be selected for plotting")
+        
+        # Check data availability and what we can actually plot
+        has_current = self.current_data is not None and plot_current
+        has_voltage = self.voltage_data is not None and plot_voltage
+        has_ttl = self.ttl_data is not None and plot_ttl
+        
+        # Validate that we have data for the requested channels
+        channels_to_plot = []
+        channel_data = []
+        channel_labels = []
+        channel_units = []
+        
+        if plot_current:
+            if self.current_data is None:
+                raise ValueError("Current data not available for plotting")
+            channels_to_plot.append('current')
+            channel_labels.append('Current')
+            channel_units.append(self.current_unit)
+        
+        if plot_voltage:
+            if self.voltage_data is None:
+                raise ValueError("Voltage data not available for plotting")
+            channels_to_plot.append('voltage')
+            channel_labels.append('Voltage')
+            channel_units.append(self.voltage_unit)
+        
+        if plot_ttl:
+            if self.ttl_data is None:
+                raise ValueError("TTL data not available for plotting")
+            channels_to_plot.append('ttl')
+            channel_labels.append('TTL')
+            channel_units.append(self.ttl_unit)
         
         # Convert marker positions to seconds if needed
         markers = []
@@ -1179,58 +1545,56 @@ class Trace():
         
         marker_1_s, marker_2_s = markers
         
-        # Check data availability
-        has_voltage = self.voltage_data is not None and plot_voltage
-        has_ttl = self.ttl_data is not None and plot_ttl
-        
-        # Determine what data to plot
-        if self.concatenate_sweeps:
-            # Original behavior
-            current_to_plot = self.current_data
-            voltage_to_plot = self.voltage_data if has_voltage else None
-            ttl_to_plot = self.ttl_data if has_ttl else None
-            time_axis = self.time
-        else:
-            # Handle separate sweeps
-            if sweep is None:
-                # Plot first sweep
-                current_to_plot = self.current_data[0]
-                voltage_to_plot = self.voltage_data[0] if has_voltage else None
-                ttl_to_plot = self.ttl_data[0] if has_ttl else None
-                time_axis = self.time
-            elif sweep == 'all':
-                # Plot all sweeps superimposed
-                current_to_plot = self.current_data
-                voltage_to_plot = self.voltage_data if has_voltage else None
-                ttl_to_plot = self.ttl_data if has_ttl else None
-                time_axis = self.time
-            elif isinstance(sweep, int):
-                if sweep >= self.num_sweeps:
-                    raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
-                current_to_plot = self.current_data[sweep]
-                voltage_to_plot = self.voltage_data[sweep] if has_voltage else None
-                ttl_to_plot = self.ttl_data[sweep] if has_ttl else None
-                time_axis = self.time
+        # Determine what data to plot based on sweep parameter
+        def get_data_for_channel(channel_name):
+            if channel_name == 'current':
+                data = self.current_data
+            elif channel_name == 'voltage':
+                data = self.voltage_data
+            elif channel_name == 'ttl':
+                data = self.ttl_data
+            
+            if self.concatenate_sweeps:
+                return data
             else:
-                raise ValueError("sweep must be None, 'all', or a valid sweep index")
+                # Handle separate sweeps
+                if sweep is None:
+                    return data[0]  # First sweep
+                elif sweep == 'all':
+                    return data  # All sweeps
+                elif isinstance(sweep, int):
+                    if sweep >= self.num_sweeps:
+                        raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
+                    return data[sweep]
+                else:
+                    raise ValueError("sweep must be None, 'all', or a valid sweep index")
         
-        if time_units in ['ms','milliseconds']:
+        # Get time axis
+        time_axis = self.time
+        if time_units in ['ms', 'milliseconds']:
             time_axis = time_axis * 1000
-
+        
         # Determine number of subplots and height ratios
-        num_plots = 1 + (1 if has_voltage else 0) + (1 if has_ttl else 0)
+        num_plots = len(channels_to_plot)
         
         if height_ratios is None:
             if num_plots == 1:
                 height_ratios = None
             elif num_plots == 2:
-                height_ratios = (3, 1)
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1)
+                else:
+                    height_ratios = (1, 1)
             else:  # num_plots == 3
-                height_ratios = (3, 1, 1)
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1, 1)
+                else:
+                    height_ratios = (1, 1, 1)
         
         # Create subplots
         if num_plots == 1:
-            # Only current data
             fig, ax = plt.subplots(figsize=(10, 4))
             axes = [ax]
         else:
@@ -1239,97 +1603,55 @@ class Trace():
             if not isinstance(axes, (list, np.ndarray)):
                 axes = [axes]
         
-        # Plot current data (always first subplot)
-        current_ax = axes[0]
-        if not self.concatenate_sweeps and sweep == 'all':
-            # Plot all sweeps with transparency
-            if plot_mean:
-                for i in range(self.num_sweeps):
-                    current_ax.plot(time_axis, current_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
-                # Plot mean in red
-                mean_current = np.mean(current_to_plot, axis=0)
-                current_ax.plot(time_axis, mean_current, color='red', linewidth=1, label='Mean')
-                # current_ax.legend()
-            else:
-                for i in range(self.num_sweeps):
-                    current_ax.plot(time_axis, current_to_plot[i], color='black', alpha=1, linewidth=0.5)
-        else:
-            current_ax.plot(time_axis, current_to_plot, color='black', linewidth=0.5)
-        
-        current_ax.set_ylabel(f'Current ({self.current_unit})')
-        current_ax.grid(True, alpha=0.3)
-        
-        # Plot voltage data (second subplot if present)
-        voltage_ax = None
-        if has_voltage:
-            voltage_ax = axes[1]
+        # Plot each requested channel
+        for i, (channel_name, label, unit) in enumerate(zip(channels_to_plot, channel_labels, channel_units)):
+            ax = axes[i]
+            data_to_plot = get_data_for_channel(channel_name)
+            
+            # Plot the data
             if not self.concatenate_sweeps and sweep == 'all':
+                # Plot all sweeps
                 if plot_mean:
-                    # Plot all sweeps with transparency
-                    for i in range(self.num_sweeps):
-                        voltage_ax.plot(time_axis, voltage_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
+                    # Plot individual sweeps with transparency
+                    for sweep_idx in range(self.num_sweeps):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='gray', alpha=0.3, linewidth=0.5)
                     # Plot mean in red
-                    mean_voltage = np.mean(voltage_to_plot, axis=0)
-                    voltage_ax.plot(time_axis, mean_voltage, color='red', linewidth=0.5, label='Mean')
-                    # voltage_ax.legend()
+                    mean_data = np.mean(data_to_plot, axis=0)
+                    ax.plot(time_axis, mean_data, color='red', linewidth=1, label='Mean')
                 else:
-                    for i in range(self.num_sweeps):
-                        voltage_ax.plot(time_axis, voltage_to_plot[i], color='black', alpha=1., linewidth=0.5)
+                    # Plot all sweeps in black
+                    for sweep_idx in range(self.num_sweeps):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
             else:
-                voltage_ax.plot(time_axis, voltage_to_plot, color='black', linewidth=0.5)
+                # Plot single trace
+                ax.plot(time_axis, data_to_plot, color='black', linewidth=0.5)
             
-            voltage_ax.set_ylabel(f'Voltage ({self.voltage_unit})')
-            voltage_ax.grid(True, alpha=0.3)
-        
-        # Plot TTL data (third subplot if present, or second if no voltage)
-        ttl_ax = None
-        if has_ttl:
-            ttl_idx = 1 + (1 if has_voltage else 0)
-            ttl_ax = axes[ttl_idx]
-            
-            if not self.concatenate_sweeps and sweep == 'all':
-                # Plot all sweeps with transparency
-                for i in range(self.num_sweeps):
-                    ttl_ax.plot(time_axis, ttl_to_plot[i], color='gray', alpha=0.3, linewidth=0.5)
-                # Plot mean in red
-                mean_ttl = np.mean(ttl_to_plot, axis=0)
-                ttl_ax.plot(time_axis, mean_ttl, color='red', linewidth=0.5, label='Mean')
-                # ttl_ax.legend()
-            else:
-                ttl_ax.plot(time_axis, ttl_to_plot, color='black', linewidth=0.5)
-            
-            ttl_ax.set_ylabel(f'TTL ({self.ttl_unit})')
-            ttl_ax.grid(True, alpha=0.3)
+            # Set labels and formatting
+            ax.set_ylabel(f'{label} ({unit})')
+            ax.grid(True, alpha=0.3)
         
         # Set x-axis label on bottom subplot
-        if time_units in ['ms','milliseconds']:
+        if time_units in ['ms', 'milliseconds']:
             axes[-1].set_xlabel('Time (ms)')
         else:
             axes[-1].set_xlabel('Time (s)')
         
         # Add markers to all subplots
-        active_axes = [ax for ax in [current_ax, voltage_ax, ttl_ax] if ax is not None]
         for marker, label in [(marker_1_s, 'marker 1'), (marker_2_s, 'marker 2')]:
             if marker is not None:
-                for subplot in active_axes:
-                    ylims = subplot.get_ylim()
-                    subplot.vlines(marker, *ylims, color='red', linestyle='-', linewidth=0.8)
-                    subplot.text(marker, ylims[1], label, fontsize=10, color='red', ha='center', va='bottom')
+                for ax in axes:
+                    ylims = ax.get_ylim()
+                    ax.vlines(marker, *ylims, color='red', linestyle='-', linewidth=0.8)
+                    ax.text(marker, ylims[1], label, fontsize=10, color='red', ha='center', va='bottom')
         
         plt.tight_layout()
         
         # Return appropriate axes
         if num_plots == 1:
-            return current_ax
-        elif num_plots == 2:
-            if has_voltage:
-                return current_ax, voltage_ax
-            else:  # has_ttl
-                return current_ax, ttl_ax
-        else:  # num_plots == 3
-            return current_ax, voltage_ax, ttl_ax
+            return axes[0]
+        else:
+            return tuple(axes)
 
-     
     def remove_sweeps_with_spikes(self, threshold: float, polarity: str = 'positive',
                                 channel: str = 'current', min_distance: int = None,
                                 prominence: float = None, return_info: bool = False):
@@ -1657,159 +1979,6 @@ class Trace():
                     filename=self.filename, voltage_data=resampled_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
-    def crop(self, timepoint: float, window: float = None, time_units: str = 's', 
-            timepoint_2: float = None, preserve_metadata: bool = True):
-        """
-        Crop the trace data around specified timepoint(s) and return a new Trace object.
-        
-        Parameters
-        ----------
-        timepoint : float
-            The center timepoint for cropping (or start timepoint if timepoint_2 is provided).
-        window : float, optional
-            The window size around the timepoint. If timepoint_2 is provided, this parameter is ignored.
-            For single timepoint: data is cropped from (timepoint - window/2) to (timepoint + window/2).
-        time_units : str, default='s'
-            Time units for timepoint, window, and timepoint_2. Options: 's' (seconds), 'ms' (milliseconds).
-        timepoint_2 : float, optional
-            Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
-            The window parameter is ignored when this is specified.
-        preserve_metadata : bool, default=True
-            Whether to preserve metadata (events, excluded_sweeps, etc.) in the new Trace object.
-        
-        Returns
-        -------
-        Trace
-            A new Trace object containing the cropped data.
-        
-        Raises
-        ------
-        ValueError
-            If no current data is available, if timepoints are out of bounds, if window is invalid,
-            or if time units are not recognized.
-        """
-        if self.current_data is None:
-            raise ValueError("No current data available for cropping")
-        
-        # Convert time units to seconds
-        if time_units in ['s', 'seconds']:
-            timepoint_s = timepoint
-            window_s = window if window is not None else None
-            timepoint_2_s = timepoint_2 if timepoint_2 is not None else None
-        elif time_units in ['ms', 'milliseconds']:
-            timepoint_s = timepoint / 1000.0
-            window_s = window / 1000.0 if window is not None else None
-            timepoint_2_s = timepoint_2 / 1000.0 if timepoint_2 is not None else None
-        else:
-            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
-        
-        # Determine start and end times
-        if timepoint_2_s is not None:
-            # Crop between two timepoints
-            start_time = min(timepoint_s, timepoint_2_s)
-            end_time = max(timepoint_s, timepoint_2_s)
-        else:
-            # Crop around single timepoint with window
-            if window_s is None:
-                raise ValueError("Either 'window' or 'timepoint_2' must be specified")
-            if window_s <= 0:
-                raise ValueError("Window size must be positive")
-            
-            start_time = timepoint_s
-            end_time = timepoint_s + window_s
-        
-        # Validate time bounds
-        if start_time < 0:
-            raise ValueError(f"Start time ({start_time:.6f} s) is before data start (0 s)")
-        if end_time > self.total_time:
-            raise ValueError(f"End time ({end_time:.6f} s) exceeds data duration ({self.total_time:.6f} s)")
-        if start_time >= end_time:
-            raise ValueError("Start time must be less than end time")
-        
-        # Convert times to sample indices
-        start_idx = int(start_time / self.sampling)
-        end_idx = int(end_time / self.sampling)
-        
-        # Ensure we don't exceed array bounds
-        if self.concatenate_sweeps:
-            max_idx = len(self.current_data)
-        else:
-            max_idx = self.current_data.shape[1]
-        
-        start_idx = max(0, start_idx)
-        end_idx = min(max_idx, end_idx)
-        
-        if start_idx >= end_idx:
-            raise ValueError("Invalid time window results in empty data")
-        
-        # Crop the data
-        if self.concatenate_sweeps:
-            # Handle 1D data (concatenated sweeps)
-            cropped_current = self.current_data[start_idx:end_idx]
-            cropped_voltage = self.voltage_data[start_idx:end_idx] if self.voltage_data is not None else None
-            cropped_ttl = self.ttl_data[start_idx:end_idx] if self.ttl_data is not None else None
-        else:
-            # Handle 2D data (separate sweeps)
-            cropped_current = self.current_data[:, start_idx:end_idx]
-            cropped_voltage = self.voltage_data[:, start_idx:end_idx] if self.voltage_data is not None else None
-            cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
-        
-        # Create new filename indicating the crop
-        if timepoint_2_s is not None:
-            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
-        else:
-            crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
-        
-        new_filename = self.filename.replace('.', crop_info + '.') if self.filename else f"cropped_trace{crop_info}.dat"
-        
-        # Create new Trace object
-        cropped_trace = Trace(
-            current_data=cropped_current,
-            sampling_interval=self.sampling,
-            current_unit=self.current_unit,
-            filename=new_filename,
-            voltage_data=cropped_voltage,
-            voltage_unit=self.voltage_unit,
-            ttl_data=cropped_ttl,
-            ttl_unit=self.ttl_unit,
-            concatenate_sweeps=self.concatenate_sweeps
-        )
-        
-        # Preserve metadata if requested
-        if preserve_metadata:
-            # Copy events if they exist and adjust their timing
-            if hasattr(self, 'events') and len(self.events) > 0:
-                # Filter events that fall within the cropped time window
-                # and adjust their timing relative to the new start
-                original_events = np.array(self.events)
-                if original_events.size > 0:
-                    # Assuming events are stored as [time, ...] format
-                    if original_events.ndim == 1:
-                        event_times = original_events
-                    else:
-                        event_times = original_events[:, 0]  # Assume first column is time
-                    
-                    # Convert to seconds if needed
-                    event_times_s = event_times * self.sampling  # Convert from sample indices to seconds
-                    
-                    # Find events within the cropped window
-                    mask = (event_times_s >= start_time) & (event_times_s < end_time)
-                    if np.any(mask):
-                        cropped_events = original_events[mask] if original_events.ndim > 1 else original_events[mask]
-                        # Adjust timing - subtract the start time and convert back to sample indices
-                        if cropped_events.size > 0:
-                            if cropped_events.ndim == 1:
-                                cropped_events = cropped_events - start_idx
-                            else:
-                                cropped_events[:, 0] = cropped_events[:, 0] - start_idx
-                            cropped_trace.events = cropped_events
-            
-            # Copy other metadata attributes if they exist
-            for attr in ['excluded_sweeps', 'excluded_series', 'Rseries']:
-                if hasattr(self, attr):
-                    setattr(cropped_trace, attr, getattr(self, attr))
-        
-        return cropped_trace
 
     def copy(self):
         """
