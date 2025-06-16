@@ -51,36 +51,34 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     conda update conda
     ```
     ```
-    conda env create --name CSHL_IonChannels --file installation_requirements.yml
-    ```
-    ```
-    conda activate CSHL_IonChannels
+    conda env create --file installation.yml
     ```
 
 ### 5. Install the "miniML" python package for miniEPSC analysis
+For analysis of miniEPSCs, we are using a recent deep-learning based package called miniML.
+(You can read more about it here: https://delvendahl.github.io/miniML/intro.html)
+
 - In the terminal, navigate back up to the main folder (IonChannelsAnalysisCode):
-    - if you are in the CSHL_IonChannels subfolder, type:
+    - if you are in the CSHL_IonChannels subfolder, type into the terminal:
     ```
     cd ..
     ```
-- Now we will follow the installation instructions from the miniML page: (https://delvendahl.github.io/miniML/intro.html) 
+- Now we will follow the installation instructions from the miniML page:
 
 - In the terminal, type the following commands:
     ```
     git clone https://github.com/delvendahl/miniML.git
     ```
-    You should see a new folder called "miniML" in your VSCode file window (on the left)
-- Use the terminal to navigate to the miniML folder, by typing (in the terminal window at thew bottom):
-    ```
-    cd miniML
-    ```
-- Install the miniML package (for miniEPSC analysis) by typing:
-    ```
-    conda create --name miniML python=3.11
-    ```
-    ```
-    conda activate miniML
-    ```
+    Once it has finished running, you should see a new folder called "miniML" in your VSCode file window (on the left)
 
+### 5. Running the analysis notebooks
 
-- **Note:** miniML is only installed in the local environment called "miniML". This needs to be active in order to run miniML. When running a notebook, make sure the jupyter kernel is set to "miniML".
+We are done and ready to start running our analysis!
+
+Just put your data (.abf files) into the correct subfolder inside *"/data"* and then open (double click) the notebook you want to run.
+
+- To run code cells, you can either hit the play button to the left of the cell, or you can select the cell and press *"shift-enter"*.
+
+- The first time you run each code notebook, you will get a popup asking to choose which Python kernel/environment (which version of Python) to use. You should select the one we just created, called *"CSHL_IonChannels"*
+
+Happy analyzing!
