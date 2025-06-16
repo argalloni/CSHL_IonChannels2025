@@ -7,31 +7,56 @@ Python material for the Cold Spring Harbor Laboratory (CSHL) course:
 ### 1. Install VSCode 
 - Got to https://code.visualstudio.com/
 - Download the installer
-- Run the installer (default options are fine)
+- If on Windows: run the installer (default options are fine)
+- If on Mac: just move the app to the Applications folder
 - Pin VSCode to the taskbar at the bottom for easy access
 
 ### 2. Install Anaconda on all of the lab desktop computers
- - Got to https://www.anaconda.com/download/success
+Anaconda is a program that makes it easy to install Python (and various dependencies/libraries), which we will be using for this course. 
+
+If you already see things related on Anaconda (e.g. the Anaconda-Navigator) on your computer, you can skip this step.
+ - Go to: https://www.anaconda.com/download/success
  - Download the "Distribution" installer (on the left)
  - Run the installer (default options are fine)
 
  ### 3. Install git on all of the lab desktop computers
- - Got to https://git-scm.com/downloads
- - Download the Windows installer (if you are on Windows desktop)
- - Run the installer (default options are fine) 
+ Git is a program that is designed to keep track of changes in code, and makes it easy to download code from GitHub.
+
+ - Go to: https://git-scm.com/downloads
+ - **If on Windows:** download the Windows installer (if you are on Windows desktop)
+    - Run the installer (default options are fine) 
+ - **If on Mac**:
+    1. Install Homebrew (if you don't already have it). Open the Terminal and paste the following command:
+        ```
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        ```
+    2. Now we can install git by entering in the terminal:
+        ```
+        brew install git
+        ```
+    3. You might also need to install a couple other packages for the images to render properly:
+        ```
+        conda install -c conda-forge nodejs
+        ```
+        ```
+        conda install jupyter
+        ```
+    
 
 ### 4. Download (git clone) this code repository to each computer
 - Make a new folder on the Desktop called "IonChannelsAnalysisCode" (exact name not important)
-- Open VSCode and open the folder
-- Open the terminal (View > Terminal, or use the keyboard shortcut ctrl+`) 
-- Verify that git is installed correctly by opening a terminal and typing:
+- Open Visual Studio Code (VSCode)
+- From within VSCode, click on the folders tab (first tab on the left) and open the folder "IonChannelsAnalysisCode" (navigate to where you saved it)
+- Open the terminal from within VSCode (View > Terminal, or use the keyboard shortcut ctrl+`) 
+- Verify that git is installed correctly by typing (in the VSCode terminal):
 ```
 git --version
 ```
-- If you see a version number, then git is installed correctly.
-- If you don't see a version number, then you need to uninstall and reinstall git.
+- If you see a version number, then git is installed correctly!
 
-- If git was installed correctly, type the following commands in the terminal:
+    (If you don't see a version number, then you need to uninstall and reinstall git.)
+
+- Now that git is installed, type the following commands in the terminal:
 ```
 git init
 ```
