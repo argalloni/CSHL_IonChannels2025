@@ -1859,10 +1859,10 @@ class Trace():
 
             if line_freq:
                 from scipy.fftpack import rfft, irfft, rfftfreq
+                multiples = 2 # Number of multiples of line frequency to remove
                 if filtered_data.ndim == 1:
                     fft = rfft(filtered_data)
                     xf = rfftfreq(filtered_data.shape[0], 1 / self.sampling_rate)
-                    multiples = 6
                     for freq in np.arange(line_freq, (multiples * line_freq), line_freq):
                         fft[np.where(xf > freq - width/2)[0][0]:np.where(xf > freq + width/2)[0][0]] = 0
                     filtered_data = irfft(fft)
@@ -1870,7 +1870,6 @@ class Trace():
                     for i in range(filtered_data.shape[0]):
                         fft = rfft(filtered_data[i])
                         xf = rfftfreq(filtered_data.shape[1], 1 / self.sampling_rate)
-                        multiples = 6
                         for freq in np.arange(line_freq, (multiples * line_freq), line_freq):
                             fft[np.where(xf > freq - width/2)[0][0]:np.where(xf > freq + width/2)[0][0]] = 0
                         filtered_data[i] = irfft(fft)
@@ -1978,7 +1977,6 @@ class Trace():
         return Trace(resampled_current, sampling_interval=new_sampling_interval, current_unit=self.current_unit, 
                     filename=self.filename, voltage_data=resampled_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
-
 
     def copy(self):
         """
