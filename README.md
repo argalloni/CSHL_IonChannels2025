@@ -107,3 +107,18 @@ Just put your data (.abf files) into the correct subfolder inside *"/data"* and 
 - The first time you run each code notebook, you will get a popup asking to choose which Python kernel/environment (which version of Python) to use. You should select the one we just created, called *"CSHL_IonChannels"*
 
 Happy analyzing!
+
+### 5. Bonus: some simple terminal commands
+
+This is not required for the installation, but it is useful to know a few basic commands for navigating the terminal:
+- **cd**: change directory
+    This is the most important command. It is used to navigate the file system.
+    - e.g. `cd CSHL_IonChannels`
+    - e.g. `cd ..` (go up one directory)
+    - e.g. `cd CSHL_IonChannels/data`
+- **ls**: list files in the current directory
+    - e.g. `ls`
+    - e.g. `ls -l` (list files in long format)
+- **pwd**: print working directory
+    
+
