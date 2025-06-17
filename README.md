@@ -76,7 +76,10 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     conda update conda
     ```
     ```
-    conda env create --file installation.yml
+    conda create --name CSHL_IonChannels python=3.11
+    ```
+    ```
+    pip install -r requirements.txt
     ```
 
 ### 5. Install the "miniML" python package for miniEPSC analysis
@@ -105,5 +108,7 @@ Just put your data (.abf files) into the correct subfolder inside *"/data"* and 
 - To run code cells, you can either hit the play button to the left of the cell, or you can select the cell and press *"shift-enter"*.
 
 - The first time you run each code notebook, you will get a popup asking to choose which Python kernel/environment (which version of Python) to use. You should select the one we just created, called *"CSHL_IonChannels"*
+
+- You might also get a popup asking to install the *ipykernel*. Click yes/install.
 
 Happy analyzing!
