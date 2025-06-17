@@ -5,527 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-##############################
-# Lowpass filter
-##############################
-
-
-def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
-    """
-    Multiple methods for baseline correction in single-channel recordings.
-    These preserve step-like channel events while removing slow baseline drift.
-    
-    Parameters:
-    -----------
-    data : array-like
-        Input signal(s). Can be 1D or 2D array.
-    sampling_freq : float
-        Sampling frequency in Hz
-    method : str
-        Method to use: 'polynomial', 'median_subtraction', 'percentile', 'running_minimum'
-    **kwargs : additional parameters for specific methods
-    
-    Returns:
-    --------
-    corrected_data : ndarray
-        Baseline-corrected signal
-    baseline : ndarray
-        Estimated baseline (for visualization)
-    """
-    
-    if data.ndim == 1:
-        data = data[np.newaxis, :]  # Make 2D for consistent processing
-        squeeze_output = True
-    else:
-        squeeze_output = False
-    
-    corrected_traces = np.zeros_like(data)
-    baselines = np.zeros_like(data)
-    
-    for i in range(data.shape[0]):
-        trace = data[i, :]
-        
-        if method == 'polynomial':
-            # Fit and subtract polynomial trend
-            degree = kwargs.get('degree', 3)
-            x = np.arange(len(trace))
-            coeffs = np.polyfit(x, trace, degree)
-            baseline = np.polyval(coeffs, x)
-            corrected = trace - baseline
-            
-        elif method == 'median_subtraction':
-            # Use median filter to estimate baseline
-            # Window should be much longer than channel events but shorter than drift
-            window_ms = kwargs.get('window_ms', 1000)  # 1 second default
-            window_samples = int(window_ms * sampling_freq / 1000)
-            
-            # Make window odd
-            if window_samples % 2 == 0:
-                window_samples += 1
-            
-            baseline = median_filter(trace, size=window_samples, mode='nearest')
-            corrected = trace - baseline
-            
-        elif method == 'percentile':
-            # Rolling percentile baseline estimation
-            window_ms = kwargs.get('window_ms', 500)
-            percentile = kwargs.get('percentile', 10)  # Use 10th percentile
-            window_samples = int(window_ms * sampling_freq / 1000)
-            
-            baseline = rolling_percentile(trace, window_samples, percentile)
-            corrected = trace - baseline
-            
-        elif method == 'running_minimum':
-            # Running minimum with smoothing
-            window_ms = kwargs.get('window_ms', 200)
-            smooth_ms = kwargs.get('smooth_ms', 50)
-            window_samples = int(window_ms * sampling_freq / 1000)
-            smooth_samples = int(smooth_ms * sampling_freq / 1000)
-            
-            # Running minimum
-            baseline = running_minimum(trace, window_samples)
-            # Smooth the baseline
-            baseline = uniform_filter1d(baseline, smooth_samples)
-            corrected = trace - baseline
-            
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        corrected_traces[i, :] = corrected
-        baselines[i, :] = baseline
-    
-    if squeeze_output:
-        return corrected_traces[0], baselines[0]
-    else:
-        return corrected_traces, baselines
-
-
-def rolling_percentile(data, window, percentile):
-    """Rolling percentile calculation"""
-    result = np.zeros_like(data)
-    half_window = window // 2
-    
-    for i in range(len(data)):
-        start = max(0, i - half_window)
-        end = min(len(data), i + half_window + 1)
-        result[i] = np.percentile(data[start:end], percentile)
-    
-    return result
-
-
-def running_minimum(data, window):
-    """Running minimum calculation"""
-    result = np.zeros_like(data)
-    half_window = window // 2
-    
-    for i in range(len(data)):
-        start = max(0, i - half_window)
-        end = min(len(data), i + half_window + 1)
-        result[i] = np.min(data[start:end])
-    
-    return result
-
-
-def adaptive_baseline_correction(data, sampling_freq, closed_level_percentile=20):
-    """
-    Adaptive method: estimate closed level and subtract slowly-varying component
-    Works well when you have clear closed and open levels
-    """
-    if data.ndim == 1:
-        data = data[np.newaxis, :]
-        squeeze_output = True
-    else:
-        squeeze_output = False
-    
-    corrected_traces = np.zeros_like(data)
-    
-    for i in range(data.shape[0]):
-        trace = data[i, :]
-        
-        # Estimate closed level (assuming most time spent closed)
-        closed_level = np.percentile(trace, closed_level_percentile)
-        
-        # Find points likely to be at closed level
-        threshold = closed_level + 0.1 * np.std(trace)  # Small tolerance
-        closed_points = trace <= threshold
-        
-        # If we have enough closed points, interpolate baseline
-        if np.sum(closed_points) > len(trace) * 0.1:  # At least 10% closed points
-            x = np.arange(len(trace))
-            closed_x = x[closed_points]
-            closed_y = trace[closed_points]
-            
-            # Interpolate baseline from closed points
-            baseline = np.interp(x, closed_x, closed_y)
-            
-            # Smooth the baseline
-            baseline = uniform_filter1d(baseline, int(0.1 * sampling_freq))  # 100ms smoothing
-            
-            corrected = trace - baseline
-        else:
-            # Fallback to polynomial detrending
-            x = np.arange(len(trace))
-            coeffs = np.polyfit(x, trace, 2)
-            baseline = np.polyval(coeffs, x)
-            corrected = trace - baseline
-        
-        corrected_traces[i, :] = corrected
-    
-    if squeeze_output:
-        return corrected_traces[0]
-    else:
-        return corrected_traces
-
-
-def remove_line_noise(data, sampling_freq, target_freq=None, bandwidth=2.0, notch_quality=30, 
-                      harmonics=2, method='notch', plot_spectrum=False, **kwargs):
-    """
-    Filter out 50/60 Hz power line noise and harmonics from electrophysiology recordings.
-    
-    Parameters:
-    -----------
-    data : array-like
-        Input signal(s). Can be 1D or 2D array.
-    sampling_freq : float
-        Sampling frequency in Hz
-    target_freq : float or None
-        Target frequency to remove (50 or 60 Hz). If None, attempts to auto-detect.
-    bandwidth : float
-        Width of the filter around the target frequency (Hz)
-    notch_quality : float
-        Quality factor for notch filter. Higher values create narrower notches.
-    harmonics : int
-        Number of harmonics to filter (1 = just fundamental, 2 = fundamental + 1st harmonic, etc.)
-    method : str
-        'notch' - IIR notch filter
-        'bandstop' - Butterworth bandstop filter
-        'fft' - FFT-based spectral subtraction
-    plot_spectrum : bool
-        If True, plots the signal spectrum before and after filtering (requires matplotlib)
-    **kwargs : additional parameters for specific methods
-    
-    Returns:
-    --------
-    filtered_data : ndarray
-        Data with line noise removed
-    noise_component : ndarray
-        Extracted noise component (for visualization)
-    """
-    
-    if data.ndim == 1:
-        data = data[np.newaxis, :]  # Make 2D for consistent processing
-        squeeze_output = True
-    else:
-        squeeze_output = False
-    
-    filtered_data = np.zeros_like(data)
-    noise_component = np.zeros_like(data)
-    
-    # Auto-detect line frequency if not specified
-    if target_freq is None:
-        target_freq = _detect_line_frequency(data[0], sampling_freq)
-        print(f"Detected line frequency: {target_freq} Hz")
-    
-    for i in range(data.shape[0]):
-        trace = data[i, :].copy()
-        
-        if method == 'notch':
-            # Apply IIR notch filter at fundamental and harmonics
-            filtered = trace.copy()
-            extracted_noise = np.zeros_like(trace)
-            
-            for h in range(1, harmonics + 1):
-                freq = target_freq * h
-                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
-                    continue
-                    
-                # Create and apply notch filter
-                b, a = signal.iirnotch(freq, notch_quality, sampling_freq)
-                
-                # Store the noise component
-                noise_component_h = filtered - signal.filtfilt(b, a, filtered)
-                extracted_noise += noise_component_h
-                
-                # Apply the filter
-                filtered = signal.filtfilt(b, a, filtered)
-            
-            filtered_trace = filtered
-            noise = extracted_noise
-            
-        elif method == 'bandstop':
-            # Apply Butterworth bandstop filters
-            filtered = trace.copy()
-            extracted_noise = np.zeros_like(trace)
-            
-            for h in range(1, harmonics + 1):
-                freq = target_freq * h
-                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
-                    continue
-                
-                # Define stop band
-                low_cutoff = freq - bandwidth/2
-                high_cutoff = freq + bandwidth/2
-                
-                # Ensure cutoffs are within valid range
-                low_cutoff = max(0.1, low_cutoff)  # Avoid too low frequencies
-                high_cutoff = min(sampling_freq/2 - 0.1, high_cutoff)  # Avoid Nyquist
-                
-                # Create and apply bandstop filter
-                order = kwargs.get('filter_order', 4)
-                sos = signal.butter(order, [low_cutoff, high_cutoff], 
-                                   btype='bandstop', fs=sampling_freq, output='sos')
-                
-                # Store the noise component
-                noise_component_h = filtered - signal.sosfiltfilt(sos, filtered)
-                extracted_noise += noise_component_h
-                
-                # Apply the filter
-                filtered = signal.sosfiltfilt(sos, filtered)
-            
-            filtered_trace = filtered
-            noise = extracted_noise
-            
-        elif method == 'fft':
-            # FFT-based spectral subtraction
-            n = len(trace)
-            
-            # Compute FFT
-            fft_data = np.fft.rfft(trace)
-            freqs = np.fft.rfftfreq(n, 1/sampling_freq)
-            
-            # Create a mask for the fundamental and harmonics
-            mask = np.ones_like(fft_data, dtype=bool)
-            
-            for h in range(1, harmonics + 1):
-                freq = target_freq * h
-                if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
-                    continue
-                
-                # Find indices within bandwidth of the target frequency
-                indices = np.where(np.abs(freqs - freq) <= bandwidth/2)[0]
-                mask[indices] = False
-            
-            # Create filtered spectrum and noise spectrum
-            noise_spectrum = fft_data.copy()
-            noise_spectrum[mask] = 0  # Only keep noise frequencies
-            
-            filtered_spectrum = fft_data.copy()
-            filtered_spectrum[~mask] = 0  # Zero out noise frequencies
-            
-            # Inverse FFT to get time domain signals
-            filtered_trace = np.fft.irfft(fft_data * mask, n=n)
-            noise = np.fft.irfft(noise_spectrum, n=n)
-            
-        else:
-            raise ValueError(f"Unknown method: {method}")
-        
-        filtered_data[i, :] = filtered_trace
-        noise_component[i, :] = noise
-    
-    # Optional spectrum plot
-    if plot_spectrum:
-        _plot_spectrum_comparison(data[0], filtered_data[0], sampling_freq, target_freq, harmonics, bandwidth)
-    
-    if squeeze_output:
-        return filtered_data[0], noise_component[0]
-    else:
-        return filtered_data, noise_component
-
-
-def _detect_line_frequency(data, sampling_freq):
-    """
-    Auto-detect whether 50Hz or 60Hz noise is more prominent
-    """
-    # Compute power spectrum
-    f, pxx = signal.welch(data, fs=sampling_freq, nperseg=min(8192, len(data)))
-    
-    # Look at power around 50Hz and 60Hz
-    band_width = 1.0  # Hz
-    
-    # Find indices for frequencies of interest
-    idx_50 = np.where((f >= 50 - band_width) & (f <= 50 + band_width))[0]
-    idx_60 = np.where((f >= 60 - band_width) & (f <= 60 + band_width))[0]
-    
-    # Calculate power in each band
-    power_50 = np.mean(pxx[idx_50]) if len(idx_50) > 0 else 0
-    power_60 = np.mean(pxx[idx_60]) if len(idx_60) > 0 else 0
-    
-    # Return the frequency with more power
-    if power_50 > power_60:
-        return 50.0
-    else:
-        return 60.0
-
-
-def _plot_spectrum_comparison(original, filtered, sampling_freq, target_freq, harmonics, bandwidth):
-    """
-    Plot spectrum before and after filtering
-    """
-    # Compute spectra
-    f1, pxx1 = signal.welch(original, fs=sampling_freq, nperseg=min(8192, len(original)))
-    f2, pxx2 = signal.welch(filtered, fs=sampling_freq, nperseg=min(8192, len(filtered)))
-    
-    # Create plot
-    plt.figure(figsize=(12, 6))
-    
-    # Plot spectra
-    plt.semilogy(f1, pxx1, 'b', alpha=0.7, label='Original')
-    plt.semilogy(f2, pxx2, 'r', alpha=0.7, label='Filtered')
-    
-    # Highlight filtered regions
-    for h in range(1, harmonics + 1):
-        freq = target_freq * h
-        if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
-            continue
-        
-        plt.axvspan(freq - bandwidth/2, freq + bandwidth/2, 
-                    color='yellow', alpha=0.3)
-        plt.axvline(freq, color='orange', linestyle='--', 
-                    alpha=0.8, label=f'{freq} Hz' if h==1 else None)
-    
-    plt.xlim(0, min(200, sampling_freq/2))  # Focus on lower frequencies
-    plt.xlabel('Frequency (Hz)')
-    plt.ylabel('Power Spectral Density')
-    plt.title('Spectrum Before and After Line Noise Filtering')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-    
-
-##############################
-# Highpass filter
-##############################
-
-def lowpass_filter(data, cutoff_freq, sampling_freq, filter_order=4, filter_type='butterworth'):
-    """
-    Apply a lowpass filter to remove high-frequency noise from single-channel recordings.
-    
-    Parameters:
-    -----------
-    data : array-like
-        Input signal(s) to filter. Can be 1D or 2D array.
-        If 2D, filtering is applied along axis=1 (each row is a trace).
-    cutoff_freq : float
-        Low-pass cutoff frequency in Hz. Frequencies above this will be attenuated.
-        For single-channel recordings, typically 1-5 kHz depending on channel kinetics.
-    sampling_freq : float
-        Sampling frequency of the data in Hz.
-    filter_order : int, optional
-        Order of the filter (default=4). Higher order = steeper rolloff.
-    filter_type : str, optional
-        Type of filter: 'butterworth' (default), 'bessel', or 'gaussian'
-        - Butterworth: Flat passband, sharp rolloff
-        - Bessel: Preserves pulse shape, gentler rolloff  
-        - Gaussian: Very smooth, good for noisy data
-    
-    Returns:
-    --------
-    filtered_data : ndarray
-        Filtered signal with same shape as input.
-        
-    Notes:
-    ------
-    - Uses zero-phase filtering (filtfilt) to avoid phase distortion
-    - For BK channels: cutoff around 2-5 kHz typically preserves kinetics
-    - For faster channels (e.g., AMPA): may need higher cutoff (5-10 kHz)
-    - Rule of thumb: cutoff should be 3-5x higher than fastest channel kinetics
-    """
-    
-    # Normalize cutoff frequency (0 to 1, where 1 is Nyquist frequency)
-    nyquist_freq = sampling_freq / 2
-    normalized_cutoff = cutoff_freq / nyquist_freq
-    
-    # Check if cutoff frequency is valid
-    if normalized_cutoff >= 1:
-        raise ValueError(f"Cutoff frequency ({cutoff_freq} Hz) must be less than "
-                        f"Nyquist frequency ({nyquist_freq} Hz)")
-    
-    if normalized_cutoff <= 0:
-        raise ValueError(f"Cutoff frequency must be positive, got {cutoff_freq} Hz")
-    
-    # Design the filter based on type
-    if filter_type.lower() == 'butterworth':
-        b, a = signal.butter(filter_order, normalized_cutoff, btype='low')
-    elif filter_type.lower() == 'bessel':
-        b, a = signal.bessel(filter_order, normalized_cutoff, btype='low')
-    elif filter_type.lower() == 'gaussian':
-        # For Gaussian filter, use different approach
-        return gaussian_filter(data, cutoff_freq, sampling_freq)
-    else:
-        raise ValueError(f"Unknown filter type: {filter_type}")
-    
-    # Apply zero-phase filtering
-    if data.ndim == 1:
-        # Single trace
-        filtered_data = signal.filtfilt(b, a, data)
-    elif data.ndim == 2:
-        # Multiple traces - filter each row
-        filtered_data = np.zeros_like(data)
-        for i in range(data.shape[0]):
-            filtered_data[i, :] = signal.filtfilt(b, a, data[i, :])
-    else:
-        raise ValueError("Data must be 1D or 2D array")
-    
-    return filtered_data
-
-
-def gaussian_filter(data, cutoff_freq, sampling_freq):
-    """
-    Apply Gaussian lowpass filter (very smooth, good for noisy data)
-    """
-    from scipy.ndimage import gaussian_filter1d
-    
-    # Convert cutoff frequency to standard deviation in samples
-    # For Gaussian filter: cutoff ≈ sampling_freq / (2π * sigma)
-    sigma = sampling_freq / (2 * np.pi * cutoff_freq)
-    
-    if data.ndim == 1:
-        filtered_data = gaussian_filter1d(data, sigma)
-    else:
-        filtered_data = gaussian_filter1d(data, sigma, axis=1)
-    
-    return filtered_data
-
-
-def optimal_cutoff_suggestion(sampling_freq, channel_type='BK'):
-    """
-    Suggest optimal cutoff frequencies based on channel type and sampling rate
-    """
-    suggestions = {
-        'BK': {'min': 1000, 'max': 5000, 'recommended': 2000},
-        'SK': {'min': 1000, 'max': 3000, 'recommended': 1500},
-        'Kv': {'min': 2000, 'max': 8000, 'recommended': 4000},
-        'Nav': {'min': 5000, 'max': 15000, 'recommended': 8000},
-        'AMPA': {'min': 5000, 'max': 20000, 'recommended': 10000},
-        'NMDA': {'min': 1000, 'max': 5000, 'recommended': 2000},
-        'GABA': {'min': 1000, 'max': 5000, 'recommended': 2000}
-    }
-    
-    if channel_type in suggestions:
-        rec = suggestions[channel_type]
-        max_possible = sampling_freq / 3  # Conservative limit
-        
-        print(f"Suggested cutoff frequencies for {channel_type} channels:")
-        print(f"  Minimum: {rec['min']} Hz")
-        print(f"  Recommended: {min(rec['recommended'], max_possible)} Hz")
-        print(f"  Maximum: {min(rec['max'], max_possible)} Hz")
-        print(f"  (Limited by sampling rate: {max_possible:.0f} Hz)")
-        
-        return min(rec['recommended'], max_possible)
-    else:
-        print(f"Unknown channel type: {channel_type}")
-        return sampling_freq / 5  # Conservative default
-
-
-##############################
-# Fit Gaussian to histogram 
-##############################
-
 def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
                                  removal_method='gaussian_subtraction', removal_factor=1.0):
     """
-    Automatically detect current levels by fitting Gaussians iteratively to current histogram
+    Automatically detect levels in a single-channel current recording by fitting Gaussians the histogram of current values
     
     Parameters:
     -----------
@@ -644,7 +127,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
             r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
             fit_stats['r_squared_individual'].append(r_squared)
             
-            print(f"  Fitted: mean={mean_fit:.3f} pA, std={std_fit:.3f} pA, R²={r_squared:.3f}")
+            print(f"Fitted: mean={mean_fit:.3f} pA, std={std_fit:.3f} pA, R²={r_squared:.3f}")
             
             # Remove the influence of this Gaussian for next iteration
             if level_idx < n_levels - 1:  # Don't remove after last fit
@@ -703,59 +186,75 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     
     # Plot results (same as before, but using fitted parameters)
     if plot_result:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        import matplotlib.gridspec as gridspec
         
-        # Plot 1: Histogram with fitted Gaussians
-        ax1.hist(all_currents, bins=bins, density=True, alpha=0.9, color='gray', 
-                edgecolor='white', label='Data')
+        fig = plt.figure(figsize=(16, 10))
+        gs = gridspec.GridSpec(2, 2, figure=fig)
         
-        if fit_stats.get('fit_success', False) and fitted_levels:
-            # Plot individual Gaussians
-            x_smooth = np.linspace(data_min, data_max, 1000)
-            colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
+        # Create the subplots
+        ax1 = fig.add_subplot(gs[0, 0])  # top left
+        ax2 = fig.add_subplot(gs[0, 1])  # top right
+        ax3 = fig.add_subplot(gs[1, :])  # bottom spanning both columns
+        
+        def plot_histogram_with_gaussians(ax, title_suffix="", ylim=None):
+            """Helper function to create histogram plot with Gaussians"""
+            ax.hist(all_currents, bins=bins, density=True, alpha=0.9, color='gray', edgecolor='white', label='Data')
             
-            for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], 
-                                                    fit_stats['means'], 
-                                                    fit_stats['stds'])):
-                individual_gaussian = amp * np.exp(-0.5 * ((x_smooth - mean) / std)**2)
-                ax1.plot(x_smooth, individual_gaussian, '-', color='red', 
-                        label=f'Level {i+1}: {mean:.2f} pA')
-                ax1.axvline(mean, color=colors[i], linestyle=':', alpha=0.8)
-        else:
-            # Just mark any detected levels
-            colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
-            for i, level in enumerate(fitted_levels):
-                ax1.axvline(level, color=colors[i], linestyle='--', 
-                           label=f'Level {i+1}: {level:.2f} pA')
+            colors = plt.cm.Set1.colors[:len(fitted_levels)]
+            if fit_stats.get('fit_success', False) and fitted_levels:
+                # Plot individual Gaussians
+                x_smooth = np.linspace(data_min, data_max, 1000)
+                
+                for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], fit_stats['means'], fit_stats['stds'])):
+                    individual_gaussian = amp * np.exp(-0.5 * ((x_smooth - mean) / std)**2)
+                    ax.plot(x_smooth, individual_gaussian, '-', color=colors[i], 
+                            label=f'Level {i+1}: {mean:.2f} pA', linewidth=3, alpha=0.8)
+                    ax.axvline(mean, color=colors[i], linestyle='--', alpha=0.8, linewidth=2)
+            else:
+                # Just mark any detected levels
+                for i, level in enumerate(fitted_levels):
+                    ax.axvline(level, color=colors[i], linestyle='--', 
+                            label=f'Level {i+1}: {level:.2f} pA')
+            
+            ax.set_xlabel('Current (pA)')
+            ax.set_ylabel('Probability Density')
+            ax.set_title(f'Current Histogram with {len(fitted_levels)} Fitted Levels{title_suffix}')
+            ax.legend(handlelength=2, handletextpad=0.5, frameon=False)
+            ax.grid(True, alpha=0.3)
+            
+            if fit_stats.get('fit_success', False):
+                ax.text(0.02, 0.98, f"R² = {fit_stats['r_squared']:.3f}", 
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Set custom ylim if provided
+            if ylim is not None:
+                ax.set_ylim(ylim)
         
-        ax1.set_xlabel('Current (pA)')
-        ax1.set_ylabel('Probability Density')
-        ax1.set_title(f'Current Histogram with {len(fitted_levels)} Fitted Levels')
-        ax1.legend(handlelength=2, handletextpad=0.5, frameon=False)
-        ax1.grid(True, alpha=0.3)
+        # Plot 1: Full histogram (top left)
+        plot_histogram_with_gaussians(ax1)
         
-        if fit_stats.get('fit_success', False):
-            ax1.text(0.02, 0.98, f"R² = {fit_stats['r_squared']:.3f}", 
-                    transform=ax1.transAxes, verticalalignment='top',
-                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        # Plot 2: Zoomed histogram (top right) - half the y-axis range
+        max_ylim = ax1.get_ylim()[1]
+        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / 20))
         
-        # Plot 2: Sample traces with detected levels
-        ax2.plot(traces.T, alpha=0.8, color='black', linewidth=0.5)
+        # Plot 3: Sample traces with detected levels (bottom, spanning both columns)
+        ax3.plot(traces.T, alpha=0.8, color='black', linewidth=0.5)
         
-        colors = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
+        colors_traces = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
         for i, level in enumerate(fitted_levels):
-            ax2.axhline(level, color=colors[i], linestyle='--', linewidth=2,
-                       label=f'Level {i}: {level:.2f} pA')
+            ax3.axhline(level, color=colors_traces[i], linestyle='--', linewidth=2,
+                    label=f'Level {i}: {level:.2f} pA')
         
-        ax2.set_xlabel('Sample Number')
-        ax2.set_ylabel('Current (pA)')
-        ax2.set_title('Sample Traces with Detected Levels')
-        ax2.legend(handlelength=2, handletextpad=0.5)
-        ax2.grid(True, alpha=0.3)
+        ax3.set_xlabel('Sample Number')
+        ax3.set_ylabel('Current (pA)')
+        ax3.set_title('Sample Traces with Detected Levels')
+        ax3.legend(handlelength=2, handletextpad=0.5)
+        ax3.grid(True, alpha=0.3)
         
         plt.tight_layout()
         plt.show()
-    
+
     # Print summary
     print(f"\n=== ITERATIVE LEVEL DETECTION RESULTS ===")
     print(f"Method: {removal_method} (factor: {removal_factor})")
@@ -772,27 +271,6 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     
     return fitted_levels, fit_stats
 
-
-def multi_gaussian(x, *params):
-    """
-    Sum of multiple Gaussians
-    params: [amp1, mean1, std1, amp2, mean2, std2, ...]
-    """
-    n_gaussians = len(params) // 3
-    result = np.zeros_like(x)
-    
-    for i in range(n_gaussians):
-        amp = params[i*3]
-        mean = params[i*3 + 1]
-        std = params[i*3 + 2]
-        result += amp * np.exp(-0.5 * ((x - mean) / std)**2)
-    
-    return result
-
-
-##############################
-# Event detection
-##############################
 
 class MultiLevelEventDetector:
     """
@@ -826,7 +304,7 @@ class MultiLevelEventDetector:
         
         # Detection parameters
         self.min_event_duration = 1.0  # ms
-        self.hysteresis_factor = 0.1   # Fraction of level difference for hysteresis
+        self.hysteresis_factor = 0.05   # Fraction of level difference for hysteresis
         
         # Results storage
         self.idealized_traces = None
@@ -1465,7 +943,6 @@ class MultiLevelEventDetector:
 
         return durations
 
-
     def calculate_open_probability(self, method='time_based'):
         """
         Calculate open probability (Po) for the channels
@@ -1705,7 +1182,7 @@ class MultiLevelEventDetector:
 
         return burst_data, summary
 
-    def plot_burst_analysis(self, burst_data, max_bursts_to_plot=2):
+    def plot_burst_analysis(self, burst_data, max_bursts_to_plot=4):
         """
         Plot the results of burst analysis
         
@@ -1714,52 +1191,38 @@ class MultiLevelEventDetector:
         burst_data : list
             Output from analyze_bursts method
         max_bursts_to_plot : int
-            Maximum number of individual bursts to plot
+            Maximum number of individual bursts to plot (default: 4)
         """
         if not burst_data:
             print("No bursts found to plot")
             return
         
-        # Create a figure with two subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        # Plot Po distribution for bursts
+        fig, ax = plt.subplots(figsize=(8, 3))
         
-        # Plot 1: Po distribution for bursts
         po_values = [burst['open_probability'] for burst in burst_data]
-        ax1.hist(po_values, bins=20, alpha=0.7, edgecolor='white')
-        ax1.set_xlabel('Open Probability (Po)')
-        ax1.set_ylabel('Number of Bursts')
-        ax1.set_title(f'Distribution of Open Probability in Bursts (n={len(burst_data)})')
-        ax1.axvline(np.mean(po_values), color='r', linestyle='--', 
+        ax.hist(po_values, bins=30, alpha=0.7, edgecolor='white')
+        ax.set_xlabel('Open Probability (Po)')
+        ax.set_ylabel('Number of Bursts')
+        ax.set_title(f'Distribution of Open Probability in Bursts (n={len(burst_data)})')
+        ax.axvline(np.mean(po_values), color='r', linestyle='--', 
                 label=f'Mean Po: {np.mean(po_values):.4f}')
-        ax1.grid(True, alpha=0.3)
-        ax1.legend()
+        ax.grid(True, alpha=0.3)
+        ax.legend()
         
-        # Plot 2: Duration vs Po
-        durations = [burst['duration'] for burst in burst_data]
-        ax2.scatter(durations, po_values, alpha=0.7)
-        ax2.set_xlabel('Burst Duration (ms)')
-        ax2.set_ylabel('Open Probability (Po)')
-        ax2.set_title('Burst Duration vs Open Probability')
-        ax2.grid(True, alpha=0.3)
-        
-        # Add correlation line if there are enough points
-        if len(durations) >= 5:
-            z = np.polyfit(durations, po_values, 1)
-            p = np.poly1d(z)
-            r = np.corrcoef(durations, po_values)[0,1]
-            ax2.plot(sorted(durations), p(sorted(durations)), 'r--', 
-                    alpha=0.8, label=f'Pearson r: {r:.2f}')
-            ax2.legend()        
         plt.tight_layout()
         plt.show()
         
-        # Plot a few example bursts
+        # Plot example bursts in 2x2 subplots
         if max_bursts_to_plot > 0:
             # Sort bursts by duration (descending) and select a subset
             sorted_bursts = sorted(burst_data, key=lambda x: x['duration'], reverse=True)
             bursts_to_plot = sorted_bursts[:min(max_bursts_to_plot, len(sorted_bursts))]
             
-            # Create one figure per burst
+            # Create 2x2 subplot figure
+            fig, axes = plt.subplots(2, 2, figsize=(12, 5))
+            axes = axes.flatten()  # Flatten to make indexing easier
+            
             for i, burst in enumerate(bursts_to_plot):
                 trace_idx = burst['trace_idx']
                 start_time = burst['start_time']
@@ -1770,29 +1233,27 @@ class MultiLevelEventDetector:
                 end_idx = np.searchsorted(self.time_array, end_time)
                 
                 # Get the section of the trace for this burst
-                time_section = self.time_array[start_idx:end_idx] * 1000  # Convert to ms
+                time_section = self.time_array[start_idx:end_idx]
                 trace_section = self.traces[trace_idx, start_idx:end_idx]
                 idealized_section = self.idealized_traces[trace_idx, start_idx:end_idx]
                 
                 # Plot the burst
-                fig, ax = plt.subplots(figsize=(6, 3))
-                ax.plot(time_section, trace_section, 'b-', alpha=0.5, label='Raw')
-                ax.plot(time_section, idealized_section, 'r-', linewidth=1, label='Idealized')
+                ax = axes[i]
+                ax.plot(time_section, trace_section, 'b-', alpha=0.4, label='Raw')
+                ax.plot(time_section, idealized_section, 'r-', linewidth=1, alpha=0.8, label='Idealized')
                 
-                # # Add level lines
-                # ax.axhline(self.baseline_level, color='k', linestyle='--', alpha=0.5, label='Baseline')
-                # for j, (level, name) in enumerate(zip(self.current_levels, self.level_names)):
-                #     ax.axhline(level, color=f'C{j+2}', linestyle='--', alpha=0.7, label=name)
-                
-                ax.set_xlabel('Time (ms)')
+                ax.set_xlabel('Time (s)')
                 ax.set_ylabel('Current (pA)')
-                ax.set_title(f'Burst {i+1} - Duration: {burst["duration"]:.1f} ms, Po: {burst["open_probability"]:.4f}')
-                # ax.legend(loc='upper right')
+                ax.set_title(f'Example burst {i+1} - Duration: {burst["duration"]:.1f} ms, Po: {burst["open_probability"]:.4f}', fontsize=12)
                 ax.grid(True, alpha=0.3)
-                
-                plt.tight_layout()
-                plt.show()
-    
+
+            # Hide any unused subplots if fewer than 4 bursts
+            for j in range(len(bursts_to_plot), 4):
+                axes[j].set_visible(False)
+            
+            plt.tight_layout()
+            plt.show()
+
     def generate_analysis_report(self):
         """
         Generate a comprehensive analysis report
@@ -1835,7 +1296,6 @@ class MultiLevelEventDetector:
         
         print("="*60)
 
-  
     def generate_analysis_report_old(self):
         """
         Generate a comprehensive analysis report

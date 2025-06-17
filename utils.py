@@ -901,6 +901,7 @@ class Trace():
         ----------
         timepoint : float
             The center timepoint for cropping (or start timepoint if timepoint_2 is provided).
+            If timepoint_2 is None, this acts as a one-sided crop boundary.
         window : float, optional
             The window size around the timepoint. If timepoint_2 is provided, this parameter is ignored.
             For single timepoint: data is cropped from (timepoint - window/2) to (timepoint + window/2).
@@ -909,6 +910,7 @@ class Trace():
         timepoint_2 : float, optional
             Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
             The window parameter is ignored when this is specified.
+            If None while timepoint is not None, performs one-sided cropping.
         preserve_metadata : bool, default=True
             Whether to preserve metadata (events, excluded_sweeps, etc.) in the new Trace object.
         
@@ -922,36 +924,53 @@ class Trace():
         ValueError
             If no current data is available, if timepoints are out of bounds, if window is invalid,
             or if time units are not recognized.
+        
+        Notes
+        -----
+        One-sided cropping behavior:
+        - If timepoint_2 is None: crops from timepoint to end of trace
+        - If timepoint is None and timepoint_2 is provided: crops from start to timepoint_2
         """
         if self.current_data is None:
             raise ValueError("No current data available for cropping")
         
         # Convert time units to seconds
         if time_units in ['s', 'seconds']:
-            timepoint_s = timepoint
+            timepoint_s = timepoint if timepoint is not None else None
             window_s = window if window is not None else None
             timepoint_2_s = timepoint_2 if timepoint_2 is not None else None
         elif time_units in ['ms', 'milliseconds']:
-            timepoint_s = timepoint / 1000.0
+            timepoint_s = timepoint / 1000.0 if timepoint is not None else None
             window_s = window / 1000.0 if window is not None else None
             timepoint_2_s = timepoint_2 / 1000.0 if timepoint_2 is not None else None
         else:
             raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
         
         # Determine start and end times
-        if timepoint_2_s is not None:
+        if timepoint_s is not None and timepoint_2_s is not None:
             # Crop between two timepoints
             start_time = min(timepoint_s, timepoint_2_s)
             end_time = max(timepoint_s, timepoint_2_s)
+            crop_type = "two_points"
+        elif timepoint_s is not None and timepoint_2_s is None:
+            # One-sided crop: from timepoint to end
+            start_time = timepoint_s
+            end_time = self.total_time
+            crop_type = "from_timepoint"
+        elif timepoint_s is None and timepoint_2_s is not None:
+            # One-sided crop: from start to timepoint_2
+            start_time = 0.0
+            end_time = timepoint_2_s
+            crop_type = "to_timepoint_2"
         else:
-            # Crop around single timepoint with window
+            # Both timepoints are None, use window-based cropping
             if window_s is None:
-                raise ValueError("Either 'window' or 'timepoint_2' must be specified")
+                raise ValueError("Either 'window', 'timepoint_2', or one-sided cropping must be specified")
             if window_s <= 0:
                 raise ValueError("Window size must be positive")
             
-            start_time = timepoint_s
-            end_time = timepoint_s + window_s
+            # This case shouldn't happen with current logic, but keeping for backwards compatibility
+            raise ValueError("At least one timepoint must be specified for cropping")
         
         # Validate time bounds
         if start_time < 0:
@@ -990,8 +1009,15 @@ class Trace():
             cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
         
         # Create new filename indicating the crop
-        if timepoint_2_s is not None:
-            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
+        if crop_type == "two_points":
+            if timepoint_2 is not None:
+                crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
+            else:
+                crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
+        elif crop_type == "from_timepoint":
+            crop_info = f"_crop_from{timepoint:.3f}{time_units}"
+        elif crop_type == "to_timepoint_2":
+            crop_info = f"_crop_to{timepoint_2:.3f}{time_units}"
         else:
             crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
         
@@ -1821,27 +1847,179 @@ class Trace():
                     voltage_data=voltage_detrended, voltage_unit=self.voltage_unit, 
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
-    def filter(self, line_freq: float=None, width: float=None, highpass: float=None, lowpass: float=None, order: int=4,
-            savgol: float=None, hann: int=None, apply_to_voltage: bool=True):
-        ''' Filters trace with a combination of line frequency, high- and lowpass filters.
-        If both lowpass and savgol arguments are passed, only the lowpass filter is applied. 
-
+    def filter_line_noise(self, line_freq: float = None, width: float = 2.0, harmonics: int = 2, 
+                        method: str = 'notch', notch_quality: float = 30, filter_order: int = 4,
+                        apply_to_voltage: bool = False):
+        """Remove line noise using advanced filtering methods.
+        
         Parameters
         ----------
         line_freq: float, default=None
-            Line noise filter frequency (Hz). Line noise is removed by spectrum interpolation.
-        width: float, default=None
-            Width of the line noise filter (Hz).
-        highpass: float, default=None
+            Line noise filter frequency (Hz). If None, attempts to auto-detect 50/60 Hz.
+        width: float, default=2.0
+            Width of the filter around the target frequency (Hz).
+        harmonics: int, default=2
+            Number of harmonics to filter (1 = just fundamental, 2 = fundamental + 1st harmonic, etc.).
+        method: str, default='notch'
+            Filtering method: 'notch' (IIR notch filter), 'bandstop' (Butterworth), or 'fft' (spectral).
+        notch_quality: float, default=30
+            Quality factor for notch filter. Higher values create narrower notches.
+        filter_order: int, default=4
+            Filter order for bandstop method.
+        apply_to_voltage: bool, default=True
+            Whether to apply the same filtering to voltage data (if available).
+            
+        Returns
+        -------
+        Trace
+            A filtered Trace object with line noise removed.
+        """
+        if self.current_data is None:
+            raise ValueError("No data to filter")
+        
+        def _detect_line_frequency(data, sampling_freq):
+            """Auto-detect whether line frequency is 50 Hz or 60 Hz."""
+            n = len(data)
+            fft_data = np.fft.rfft(data)
+            freqs = np.fft.rfftfreq(n, 1/sampling_freq)
+            power = np.abs(fft_data)**2
+            
+            # Check power around 50 Hz and 60 Hz
+            idx_50 = np.argmin(np.abs(freqs - 50))
+            idx_60 = np.argmin(np.abs(freqs - 60))
+            
+            power_50 = np.mean(power[max(0, idx_50-2):idx_50+3])
+            power_60 = np.mean(power[max(0, idx_60-2):idx_60+3])
+            
+            return 50.0 if power_50 > power_60 else 60.0
+        
+        def _remove_line_noise(data, sampling_freq, target_freq, bandwidth, harmonics, method, 
+                            notch_quality, filter_order):
+            """Remove line noise from data array."""
+            if data.ndim == 1:
+                data = data[np.newaxis, :]
+                squeeze_output = True
+            else:
+                squeeze_output = False
+            
+            filtered_data = np.zeros_like(data)
+            
+            # Auto-detect line frequency if not specified
+            if target_freq is None:
+                target_freq = _detect_line_frequency(data[0], sampling_freq)
+            
+            for i in range(data.shape[0]):
+                trace = data[i, :].copy()
+                
+                if method == 'notch':
+                    # Apply IIR notch filter at fundamental and harmonics
+                    filtered = trace.copy()
+                    
+                    for h in range(1, harmonics + 1):
+                        freq = target_freq * h
+                        if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                            continue
+                        
+                        # Create and apply notch filter
+                        b, a = signal.iirnotch(freq, notch_quality, sampling_freq)
+                        filtered = signal.filtfilt(b, a, filtered)
+                    
+                    filtered_data[i, :] = filtered
+                    
+                elif method == 'bandstop':
+                    # Apply Butterworth bandstop filters
+                    filtered = trace.copy()
+                    
+                    for h in range(1, harmonics + 1):
+                        freq = target_freq * h
+                        if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                            continue
+                        
+                        # Define stop band
+                        low_cutoff = freq - bandwidth/2
+                        high_cutoff = freq + bandwidth/2
+                        
+                        # Ensure cutoffs are within valid range
+                        low_cutoff = max(0.1, low_cutoff)  # Avoid too low frequencies
+                        high_cutoff = min(sampling_freq/2 - 0.1, high_cutoff)  # Avoid Nyquist
+                        
+                        # Create and apply bandstop filter
+                        sos = signal.butter(filter_order, [low_cutoff, high_cutoff], 
+                                        btype='bandstop', fs=sampling_freq, output='sos')
+                        filtered = signal.sosfiltfilt(sos, filtered)
+                    
+                    filtered_data[i, :] = filtered
+                    
+                elif method == 'fft':
+                    # FFT-based spectral subtraction
+                    n = len(trace)
+                    
+                    # Compute FFT
+                    fft_data = np.fft.rfft(trace)
+                    freqs = np.fft.rfftfreq(n, 1/sampling_freq)
+                    
+                    # Create a mask for the fundamental and harmonics
+                    mask = np.ones_like(fft_data, dtype=bool)
+                    
+                    for h in range(1, harmonics + 1):
+                        freq = target_freq * h
+                        if freq >= sampling_freq / 2:  # Skip if above Nyquist frequency
+                            continue
+                        
+                        # Find indices within bandwidth of the target frequency
+                        indices = np.where(np.abs(freqs - freq) <= bandwidth/2)[0]
+                        mask[indices] = False
+                    
+                    # Inverse FFT to get filtered signal
+                    filtered_data[i, :] = np.fft.irfft(fft_data * mask, n=n)
+                    
+                else:
+                    raise ValueError(f"Unknown method: {method}. Use 'notch', 'bandstop', or 'fft'.")
+            
+            if squeeze_output:
+                return filtered_data[0]
+            else:
+                return filtered_data
+        
+        # Apply filtering to current data
+        filtered_current = _remove_line_noise(
+            self.current_data, 
+            self.sampling_rate, 
+            line_freq, 
+            width, 
+            harmonics, 
+            method,
+            notch_quality,
+            filter_order
+        )
+        
+        # Apply same filtering to voltage data if requested and available
+        filtered_voltage = None
+        if self.voltage_data is not None and apply_to_voltage:
+            filtered_voltage = _remove_line_noise(
+                self.voltage_data, 
+                self.sampling_rate, 
+                line_freq, 
+                width, 
+                harmonics, 
+                method,
+                notch_quality,
+                filter_order
+            )
+        
+        return Trace(filtered_current, sampling_interval=self.sampling, current_unit=self.current_unit, 
+                    filename=self.filename, voltage_data=filtered_voltage, voltage_unit=self.voltage_unit,
+                    concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
+
+    def highpass_filter(self, cutoff_freq: float, order: int = 4, apply_to_voltage: bool = False):
+        """Apply highpass filter to the signal.
+        
+        Parameters
+        ----------
+        cutoff_freq: float
             Highpass cutoff frequency (Hz).
-        lowpass: float, default=None
-            Lowpass cutoff frequency (Hz). Set to None to turn filtering off.
         order: int, default=4
             Order of the filter.
-        savgol: float, default=None
-            The time window for Savitzky-Golay smoothing (ms).
-        hann: int, default=None
-            The length of the Hann window (samples).
         apply_to_voltage: bool, default=True
             Whether to apply the same filtering to voltage data (if available).
             
@@ -1849,84 +2027,121 @@ class Trace():
         -------
         Trace
             A filtered Trace object.
-        '''
+        """
         if self.current_data is None:
             raise ValueError("No data to filter")
         
-        def apply_filters(data, original_data):
+        from scipy import signal
+        
+        def apply_highpass(data):
             filtered_data = data.copy()
             nyq = 0.5 * self.sampling_rate
+            sos = signal.butter(order, cutoff_freq / nyq, btype='high', output='sos')
+            
+            if filtered_data.ndim == 1:
+                filtered_data = signal.sosfilt(sos, filtered_data)
+            else:
+                for i in range(filtered_data.shape[0]):
+                    filtered_data[i] = signal.sosfilt(sos, filtered_data[i])
+            
+            return filtered_data
+        
+        # Apply filtering to current data
+        filtered_current = apply_highpass(self.current_data)
+        
+        # Apply same filtering to voltage data if requested and available
+        filtered_voltage = None
+        if self.voltage_data is not None and apply_to_voltage:
+            filtered_voltage = apply_highpass(self.voltage_data)
+        
+        return Trace(filtered_current, sampling_interval=self.sampling, current_unit=self.current_unit, 
+                    filename=self.filename, voltage_data=filtered_voltage, voltage_unit=self.voltage_unit,
+                    concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
-            if line_freq:
-                from scipy.fftpack import rfft, irfft, rfftfreq
-                multiples = 2 # Number of multiples of line frequency to remove
-                if filtered_data.ndim == 1:
-                    fft = rfft(filtered_data)
-                    xf = rfftfreq(filtered_data.shape[0], 1 / self.sampling_rate)
-                    for freq in np.arange(line_freq, (multiples * line_freq), line_freq):
-                        fft[np.where(xf > freq - width/2)[0][0]:np.where(xf > freq + width/2)[0][0]] = 0
-                    filtered_data = irfft(fft)
-                else:
-                    for i in range(filtered_data.shape[0]):
-                        fft = rfft(filtered_data[i])
-                        xf = rfftfreq(filtered_data.shape[1], 1 / self.sampling_rate)
-                        for freq in np.arange(line_freq, (multiples * line_freq), line_freq):
-                            fft[np.where(xf > freq - width/2)[0][0]:np.where(xf > freq + width/2)[0][0]] = 0
-                        filtered_data[i] = irfft(fft)
-                    
-            if highpass:
-                sos = signal.butter(order, highpass / nyq, btype='high', output='sos')
-                if filtered_data.ndim == 1:
-                    filtered_data = signal.sosfilt(sos, filtered_data)
-                else:
-                    for i in range(filtered_data.shape[0]):
-                        filtered_data[i] = signal.sosfilt(sos, filtered_data[i])
-                        
-            if lowpass:
-                assert lowpass < nyq, "The lowpass cutoff frequency must be less than the Nyquist frequenct (sampling rate / 2)"
-                if savgol:
+    def lowpass_filter(self, cutoff_freq: float = None, order: int = 4, savgol_window: float = None, 
+                    hann_length: int = None, apply_to_voltage: bool = False):
+        """Apply lowpass filter to the signal using Butterworth, Savitzky-Golay, or Hann window.
+        
+        If multiple filter types are specified, priority is: Butterworth > Savitzky-Golay > Hann.
+        
+        Parameters
+        ----------
+        cutoff_freq: float, default=None
+            Butterworth lowpass cutoff frequency (Hz). If None, Butterworth filter is not applied.
+        order: int, default=4
+            Order of the Butterworth filter or polynomial order for Savitzky-Golay.
+        savgol_window: float, default=None
+            The time window for Savitzky-Golay smoothing (ms). Ignored if cutoff_freq is specified.
+        hann_length: int, default=None
+            The length of the Hann window (samples). Ignored if cutoff_freq or savgol_window is specified.
+        apply_to_voltage: bool, default=True
+            Whether to apply the same filtering to voltage data (if available).
+            
+        Returns
+        -------
+        Trace
+            A filtered Trace object.
+        """
+        if self.current_data is None:
+            raise ValueError("No data to filter")
+        
+        from scipy import signal
+        import numpy as np
+        
+        def apply_lowpass(data, original_data):
+            filtered_data = data.copy()
+            
+            if cutoff_freq:
+                # Butterworth lowpass filter
+                nyq = 0.5 * self.sampling_rate
+                assert cutoff_freq < nyq, "The lowpass cutoff frequency must be less than the Nyquist frequency (sampling rate / 2)"
+                
+                if savgol_window:
                     print('Warning: Two lowpass filters selected, Savgol filter is ignored.')
-                sos = signal.butter(order, lowpass / nyq, btype='low', analog=False, output='sos', fs=None)
+                
+                sos = signal.butter(order, cutoff_freq / nyq, btype='low', analog=False, output='sos', fs=None)
                 if filtered_data.ndim == 1:
                     filtered_data = signal.sosfiltfilt(sos, filtered_data)
                 else:
                     for i in range(filtered_data.shape[0]):
                         filtered_data[i] = signal.sosfiltfilt(sos, filtered_data[i])
                         
-            elif savgol:
-                window_length = int(savgol / 1000 / self.sampling)
+            elif savgol_window:
+                # Savitzky-Golay filter
+                window_length = int(savgol_window / 1000 / self.sampling)
                 if filtered_data.ndim == 1:
                     filtered_data = signal.savgol_filter(filtered_data, window_length, polyorder=order)
                 else:
                     for i in range(filtered_data.shape[0]):
                         filtered_data[i] = signal.savgol_filter(filtered_data[i], window_length, polyorder=order)
                         
-            elif hann:
-                win = signal.windows.hann(hann)
+            elif hann_length:
+                # Hann window filter
+                win = signal.windows.hann(hann_length)
                 if filtered_data.ndim == 1:
                     filtered_data = signal.convolve(filtered_data, win, mode='same') / sum(win)
                     # Hann window generates edge artifacts due to zero-padding. Retain unfiltered data at edges.
-                    filtered_data[:hann] = original_data[:hann]
-                    filtered_data[filtered_data.shape[0] - hann:] = original_data[filtered_data.shape[0] - hann:]
+                    filtered_data[:hann_length] = original_data[:hann_length]
+                    filtered_data[filtered_data.shape[0] - hann_length:] = original_data[filtered_data.shape[0] - hann_length:]
                 else:
                     for i in range(filtered_data.shape[0]):
                         filtered_data[i] = signal.convolve(filtered_data[i], win, mode='same') / sum(win)
                         # Hann window generates edge artifacts due to zero-padding. Retain unfiltered data at edges.
-                        filtered_data[i, :hann] = original_data[i, :hann]
-                        filtered_data[i, filtered_data.shape[1] - hann:] = original_data[i, filtered_data.shape[1] - hann:]
+                        filtered_data[i, :hann_length] = original_data[i, :hann_length]
+                        filtered_data[i, filtered_data.shape[1] - hann_length:] = original_data[i, filtered_data.shape[1] - hann_length:]
             
             return filtered_data
-
+        
         # Apply filtering to current data
-        filtered_current = apply_filters(self.current_data, self.current_data)
+        filtered_current = apply_lowpass(self.current_data, self.current_data)
         
         # Apply same filtering to voltage data if requested and available
         filtered_voltage = None
         if self.voltage_data is not None and apply_to_voltage:
-            filtered_voltage = apply_filters(self.voltage_data, self.voltage_data)
-
-        return Trace(filtered_current, sampling_interval=self.sampling, current_unit=self.current_unit, filename=self.filename,
-                    voltage_data=filtered_voltage, voltage_unit=self.voltage_unit,
+            filtered_voltage = apply_lowpass(self.voltage_data, self.voltage_data)
+        
+        return Trace(filtered_current, sampling_interval=self.sampling, current_unit=self.current_unit, 
+                    filename=self.filename, voltage_data=filtered_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
     def resample(self, sampling_frequency: float=None):
