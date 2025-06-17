@@ -1,11 +1,16 @@
-import matplotlib.pyplot as plt
-import pyabf
+
 import numpy as np
 from scipy import signal
 from scipy.optimize import curve_fit
-from scipy.ndimage import maximum_filter1d
+# from scipy.ndimage import maximum_filter1d
+from scipy.special import comb # for binomial coefficients
+
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import pyabf
 from pathlib import Path
 import h5py
+
 
 ###############################
 # Data import functions
@@ -20,7 +25,6 @@ def get_sweeps(f):
     swps = np.array(swps)
     swp_time = rec.sweepX
     return swps, swp_time, rec.dataRate
-
 
 
 class Trace():
@@ -2205,6 +2209,1077 @@ class Trace():
         """
         import copy as copy_module
         return copy_module.deepcopy(self)
+
+
+###############################
+# Single channel analysis
+###############################
+
+def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
+                                 removal_method='gaussian_subtraction', removal_factor=1.0):
+    """
+    Automatically detect levels in a single-channel current recording by fitting Gaussians the histogram of current values
+    
+    Parameters:
+    -----------
+    traces : array-like (n_sweeps, n_timepoints)
+        Filtered current traces
+    n_levels : int
+        Number of Gaussian peaks to fit (including baseline)
+        E.g., n_levels=3 means baseline + 2 open levels
+    plot_result : bool
+        Whether to plot the histogram and fitted Gaussians
+    bins : int
+        Number of histogram bins
+    mean_guesses : list or None
+        Optional list of initial guesses for the means of the Gaussians
+        If provided, must have length equal to n_levels
+    removal_method : str
+        Method for removing fitted Gaussian influence:
+        - 'gaussian_subtraction': subtract fitted Gaussian from histogram
+        - 'data_masking': remove data points within N*std of fitted mean
+        - 'weighted_subtraction': subtract with weights based on Gaussian probability
+    removal_factor : float
+        Factor for removal method (e.g., N*std for masking, or subtraction strength)
+        
+    Returns:
+    --------
+    detected_levels : list
+        Sorted list of detected current levels (means of Gaussians)
+    fit_params : dict
+        Dictionary containing fit parameters and statistics
+    """
+    
+    # Flatten all traces into single array
+    all_currents = traces.flatten()
+    
+    # Create histogram
+    counts, bin_edges = np.histogram(all_currents, bins=bins, density=True)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    
+    # Store original histogram for plotting
+    original_counts = counts.copy()
+    
+    # Data range for bounds
+    data_min, data_max = np.min(all_currents), np.max(all_currents)
+    data_range = data_max - data_min
+    
+    # Check if valid mean guesses were provided
+    using_custom_means = False
+    if mean_guesses is not None:
+        if len(mean_guesses) == n_levels:
+            using_custom_means = True
+            mean_order = np.argsort(mean_guesses)  # Sort by value
+            sorted_mean_guesses = [mean_guesses[i] for i in mean_order]
+            print(f"Using provided mean guesses: {sorted_mean_guesses}")
+        else:
+            print(f"Warning: {len(mean_guesses)} mean guesses provided but {n_levels} levels requested.")
+            print("Ignoring provided guesses and using automatic detection.")
+    
+    # Store results for each fitted Gaussian
+    fitted_gaussians = []
+    fitted_levels = []
+    working_counts = counts.copy()
+    working_data = all_currents.copy()
+    
+    fit_stats = {'amplitudes': [], 'means': [], 'stds': [], 'fit_success': True, 'r_squared_individual': []}
+    
+    # Iteratively fit Gaussians
+    for level_idx in range(n_levels):        
+        # Determine initial guess for this level
+        if using_custom_means:
+            mean_guess = sorted_mean_guesses[level_idx]
+            # Find amplitude at this mean
+            closest_bin = np.argmin(np.abs(bin_centers - mean_guess))
+            amp_guess = working_counts[closest_bin]
+        else:
+            # Find the highest peak in remaining histogram
+            if np.max(working_counts) <= 0:
+                print(f"No significant peaks remaining for level {level_idx + 1}")
+                break
+                
+            peak_idx = np.argmax(working_counts)
+            mean_guess = bin_centers[peak_idx]
+            amp_guess = working_counts[peak_idx]
+        
+        # Conservative std guess
+        std_guess = data_range / (n_levels * 4)
+        
+        # Fit single Gaussian to current working histogram
+        try:
+            # Parameter bounds for single Gaussian
+            lower_bounds = [0, data_min - data_range*0.1, data_range/100]
+            upper_bounds = [np.inf, data_max + data_range*0.1, data_range/2]
+            
+            popt, pcov = curve_fit(
+                lambda x, a, m, s: a * np.exp(-0.5 * ((x - m) / s)**2),
+                bin_centers, working_counts,
+                p0=[amp_guess, mean_guess, std_guess],
+                bounds=(lower_bounds, upper_bounds),
+                maxfev=50000
+            )
+            
+            amp_fit, mean_fit, std_fit = popt
+            
+            # Store fitted parameters
+            fitted_gaussians.append(popt)
+            fitted_levels.append(mean_fit)
+            fit_stats['amplitudes'].append(amp_fit)
+            fit_stats['means'].append(mean_fit)
+            fit_stats['stds'].append(std_fit)
+            
+            # Calculate R-squared for this individual fit
+            y_fitted = amp_fit * np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+            ss_res = np.sum((working_counts - y_fitted) ** 2)
+            ss_tot = np.sum((working_counts - np.mean(working_counts)) ** 2)
+            r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            fit_stats['r_squared_individual'].append(r_squared)
+            
+            print(f"Fitted: mean={mean_fit:.3f} pA, std={std_fit:.3f} pA, R²={r_squared:.3f}")
+            
+            # Remove the influence of this Gaussian for next iteration
+            if level_idx < n_levels - 1:  # Don't remove after last fit
+                if removal_method == 'gaussian_subtraction':
+                    # Subtract fitted Gaussian from histogram
+                    fitted_gaussian = amp_fit * np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+                    working_counts = np.maximum(working_counts - removal_factor * fitted_gaussian, 
+                                              np.zeros_like(working_counts))
+                    
+                elif removal_method == 'data_masking':
+                    # Remove data points within N*std of fitted mean
+                    mask = np.abs(working_data - mean_fit) > removal_factor * std_fit
+                    working_data = working_data[mask]
+                    if len(working_data) > 0:
+                        working_counts, _ = np.histogram(working_data, bins=bin_centers, density=True)
+                    else:
+                        working_counts = np.zeros_like(working_counts)
+                        
+                elif removal_method == 'weighted_subtraction':
+                    # Subtract with weights based on Gaussian probability
+                    gaussian_weights = np.exp(-0.5 * ((bin_centers - mean_fit) / std_fit)**2)
+                    fitted_gaussian = amp_fit * gaussian_weights
+                    working_counts = np.maximum(working_counts - removal_factor * fitted_gaussian,
+                                              0.1 * original_counts)  # Keep some minimum
+                
+        except Exception as e:
+            print(f"  Fitting failed for level {level_idx + 1}: {e}")
+            fit_stats['fit_success'] = False
+            break
+    
+    # Sort levels by current value
+    if fitted_levels:
+        sort_order = np.argsort(fitted_levels)
+        fitted_levels = [fitted_levels[i] for i in sort_order]
+        
+        # Reorder fit_stats accordingly
+        for key in ['amplitudes', 'means', 'stds', 'r_squared_individual']:
+            if key in fit_stats:
+                fit_stats[key] = [fit_stats[key][i] for i in sort_order]
+        
+        # Calculate overall R-squared using all fitted Gaussians
+        all_fitted = np.zeros_like(bin_centers)
+        for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], 
+                                                fit_stats['means'], 
+                                                fit_stats['stds'])):
+            all_fitted += amp * np.exp(-0.5 * ((bin_centers - mean) / std)**2)
+        
+        ss_res = np.sum((original_counts - all_fitted) ** 2)
+        ss_tot = np.sum((original_counts - np.mean(original_counts)) ** 2)
+        fit_stats['r_squared'] = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+    else:
+        print("No levels successfully fitted!")
+        fitted_levels = []
+        fit_stats['fit_success'] = False
+    
+    # Plot results (same as before, but using fitted parameters)
+    if plot_result:        
+        fig = plt.figure(figsize=(16, 10))
+        gs = gridspec.GridSpec(2, 2, figure=fig)
+        
+        # Create the subplots
+        ax1 = fig.add_subplot(gs[0, 0])  # top left
+        ax2 = fig.add_subplot(gs[0, 1])  # top right
+        ax3 = fig.add_subplot(gs[1, :])  # bottom spanning both columns
+        
+        def plot_histogram_with_gaussians(ax, title_suffix="", ylim=None):
+            """Helper function to create histogram plot with Gaussians"""
+            ax.hist(all_currents, bins=bins, density=True, alpha=0.9, color='gray', edgecolor='white', label='Data')
+            
+            colors = plt.cm.Set1.colors[:len(fitted_levels)]
+            if fit_stats.get('fit_success', False) and fitted_levels:
+                # Plot individual Gaussians
+                x_smooth = np.linspace(data_min, data_max, 1000)
+                
+                for i, (amp, mean, std) in enumerate(zip(fit_stats['amplitudes'], fit_stats['means'], fit_stats['stds'])):
+                    individual_gaussian = amp * np.exp(-0.5 * ((x_smooth - mean) / std)**2)
+                    ax.plot(x_smooth, individual_gaussian, '-', color=colors[i], 
+                            label=f'Level {i+1}: {mean:.2f} pA', linewidth=3, alpha=0.8)
+                    ax.axvline(mean, color=colors[i], linestyle='--', alpha=0.8, linewidth=2)
+            else:
+                # Just mark any detected levels
+                for i, level in enumerate(fitted_levels):
+                    ax.axvline(level, color=colors[i], linestyle='--', 
+                            label=f'Level {i+1}: {level:.2f} pA')
+            
+            ax.set_xlabel('Current (pA)')
+            ax.set_ylabel('Probability Density')
+            ax.set_title(f'Current Histogram with {len(fitted_levels)} Fitted Levels{title_suffix}')
+            ax.legend(handlelength=2, handletextpad=0.5, frameon=False)
+            ax.grid(True, alpha=0.3)
+            
+            if fit_stats.get('fit_success', False):
+                ax.text(0.02, 0.98, f"R² = {fit_stats['r_squared']:.3f}", 
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Set custom ylim if provided
+            if ylim is not None:
+                ax.set_ylim(ylim)
+        
+        # Plot 1: Full histogram (top left)
+        plot_histogram_with_gaussians(ax1)
+        
+        # Plot 2: Zoomed histogram (top right) - half the y-axis range
+        max_ylim = ax1.get_ylim()[1]
+        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / 30))
+        
+        # Plot 3: Sample traces with detected levels (bottom, spanning both columns)
+        ax3.plot(traces.T, alpha=0.8, color='black', linewidth=0.5)
+        
+        colors_traces = plt.cm.Set1(np.linspace(0, 1, len(fitted_levels)))
+        for i, level in enumerate(fitted_levels):
+            ax3.axhline(level, color=colors_traces[i], linestyle='--', linewidth=2,
+                    label=f'Level {i}: {level:.2f} pA')
+        
+        ax3.set_xlabel('Sample Number')
+        ax3.set_ylabel('Current (pA)')
+        ax3.set_title('Sample Traces with Detected Levels')
+        ax3.legend(handlelength=2, handletextpad=0.5)
+        ax3.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+
+    # Print summary
+    print(f"\n=== ITERATIVE LEVEL DETECTION RESULTS ===")
+    print(f"Method: {removal_method} (factor: {removal_factor})")
+    print(f"Detected {len(fitted_levels)} current levels:")
+    for i, level in enumerate(fitted_levels):
+        print(f"  Level {i}: {level:.3f} pA")
+
+    return fitted_levels
+
+
+class MultiLevelEventDetector:
+    """
+    Interactive event detection for single-channel recordings with multiple conductance levels.
+    Allows manual specification of up to 5 different current levels above baseline.
+    """
+    
+    def __init__(self, trace, time_array, sampling_freq):
+        """
+        Initialize the event detector
+        
+        Parameters:
+        -----------
+        traces : array-like (n_sweeps, n_timepoints)
+            Filtered current traces
+        time_array : array-like
+            Time values for each sample
+        sampling_freq : float
+            Sampling frequency in Hz
+        """
+        self.trace = np.array(trace)
+        self.time_array = np.array(time_array)
+        self.sampling_freq = sampling_freq
+        self.n_timepoints = self.trace.shape[0]
+        
+        # Initialize level parameters - single dictionary containing all levels
+        self.levels = {}  # Format: {'Baseline': value, 'L1': value, 'L2': value, ...}
+        self.detection_thresholds = []  # Midpoint thresholds between levels
+        
+        # Detection parameters
+        self.min_event_duration = 1.0  # ms
+        self.hysteresis_factor = 0.05   # Fraction of level difference for hysteresis
+        
+        # Results storage
+        self.idealized_trace = None
+        self.events = []  # List of events
+            
+    def set_current_levels(self, levels):
+        """
+        Manually set current levels above baseline
+        
+        Parameters:
+        -----------
+        levels : list
+            List of current values (in pA) for each conductance level
+            Should be in ascending order from baseline
+        """
+        if len(levels) > 5:
+            raise ValueError("Maximum 5 levels supported")
+        
+        # Ensure levels are sorted
+        levels = sorted(levels)
+        
+        # Store in single dictionary
+        self.levels = {'Baseline': levels[0]}
+        for i, level in enumerate(levels[1:], 1):
+            self.levels[f'L{i}'] = level
+
+        # Calculate detection thresholds (midpoints between levels)
+        level_values = list(self.levels.values())
+        self.detection_thresholds = []
+        
+        for i in range(len(level_values) - 1):
+            threshold = (level_values[i] + level_values[i+1]) / 2
+            self.detection_thresholds.append(threshold)
+        
+        print(f"Set {len(levels)} current levels:")
+        for level_name, level_value in self.levels.items():
+            print(f"  {level_name}: {level_value:.2f} pA")
+        
+        print(f"Detection thresholds: {[f'{t:.2f}' for t in self.detection_thresholds]} pA")
+
+    def detect_events(self, plot_result=False):
+        """
+        Detect events in a single trace using the specified levels
+        
+        Parameters:
+        -----------
+        plot_result : bool
+            Whether to plot the results
+            
+        Returns:
+        --------
+        events : list
+            List of events, each containing: [start_time, end_time, level_idx, amplitude]
+        idealized : array
+            Idealized trace
+        """
+        baseline_level = self.levels['Baseline']
+        idealized = np.full_like(self.trace, baseline_level)
+        events = []
+        
+        # Convert minimum duration to samples
+        min_samples = int(self.min_event_duration * self.sampling_freq / 1000)
+
+        # State tracking
+        current_level = 0  # 0 = baseline, 1+ = levels above baseline
+        event_start = 0  # Start tracking from the beginning for baseline events too
+        
+        # Create separate thresholds for up and down transitions with hysteresis
+        level_values = list(self.levels.values())
+        
+        # Thresholds for upward transitions (opening)
+        thresholds_up = []
+        # Thresholds for downward transitions (closing)
+        thresholds_down = []
+        
+        for i in range(len(level_values) - 1):
+            level_diff = level_values[i+1] - level_values[i]
+            hysteresis = self.hysteresis_factor * level_diff
+            
+            # Midpoint between levels
+            midpoint = (level_values[i] + level_values[i+1]) / 2
+            
+            # Apply hysteresis
+            thresholds_up.append(midpoint + hysteresis/2)
+            thresholds_down.append(midpoint - hysteresis/2)
+        
+        # Get open level values (excluding baseline)
+        open_levels = [self.levels[key] for key in self.levels.keys() if key != 'Baseline']
+        
+        # State machine for event detection
+        for i, current_value in enumerate(self.trace):
+            new_level = current_level
+            
+            # Determine which level the current value belongs to
+            if current_value <= thresholds_down[0]:
+                # Below first threshold - definitely baseline
+                new_level = 0
+            else:
+                # Check each level from highest to lowest
+                found_level = False
+                
+                # First check if we're above the highest threshold
+                if len(thresholds_up) > 0 and current_value >= thresholds_up[-1]:
+                    new_level = len(open_levels)
+                    found_level = True
+                
+                if not found_level:
+                    # Check intermediate levels
+                    for level_idx in range(len(open_levels) - 1, -1, -1):
+                        if level_idx == 0:
+                            # Transition from baseline to L1
+                            if current_value >= thresholds_up[0]:
+                                new_level = 1
+                                found_level = True
+                                break
+                        else:
+                            # Transition between levels
+                            if (current_value >= thresholds_down[level_idx] and 
+                                current_value < thresholds_up[level_idx]):
+                                new_level = level_idx
+                                found_level = True
+                                break
+                            elif current_value >= thresholds_up[level_idx]:
+                                new_level = level_idx + 1
+                                found_level = True
+                                break
+                
+                if not found_level:
+                    new_level = 0  # Default to baseline if no level found
+            
+            # Apply some smoothing - only change level if it's stable for a few samples
+            # This helps reduce noise-induced false transitions
+            stable_samples = max(3, int(0.1 * self.sampling_freq / 1000))  # At least 3 samples or 0.1ms
+            
+            if new_level != current_level:
+                # Check if this level change is stable over next few samples
+                if i + stable_samples < len(self.trace):
+                    future_values = self.trace[i:i+stable_samples]
+                    stable = True
+                    
+                    for val in future_values:
+                        temp_level = 0
+                        if val <= thresholds_down[0]:
+                            temp_level = 0
+                        else:
+                            for level_idx in range(len(open_levels) - 1, -1, -1):
+                                if level_idx == 0:
+                                    if val >= thresholds_up[0]:
+                                        temp_level = 1
+                                        break
+                                else:
+                                    if (val >= thresholds_down[level_idx] and 
+                                        val < thresholds_up[level_idx]):
+                                        temp_level = level_idx
+                                        break
+                                    elif val >= thresholds_up[level_idx]:
+                                        temp_level = level_idx + 1
+                                        break
+                        
+                        if temp_level != new_level:
+                            stable = False
+                            break
+                    
+                    if not stable:
+                        new_level = current_level  # Keep current level if not stable
+            
+            # Handle level changes
+            if new_level != current_level:
+                # End previous event if it was long enough (for any level, including baseline)
+                if (i - event_start) >= min_samples:
+                    end_time = self.time_array[i-1]
+                    level_idx = current_level
+                    amplitude = open_levels[current_level-1] if current_level > 0 else baseline_level
+                    
+                    events.append([self.time_array[event_start], end_time, level_idx, amplitude])
+                    
+                    # Fill idealized trace for this event
+                    idealized[event_start:i] = amplitude
+                    
+                    # Start new event
+                    event_start = i
+                else:
+                    # Event was too short, so we extend the previous event
+                    # But we'll still change the current level for future checks
+                    current_level = new_level
+                    continue
+                
+                current_level = new_level
+        
+        # Handle final event
+        if (len(self.trace) - event_start) >= min_samples:
+            end_time = self.time_array[-1]
+            level_idx = current_level
+            amplitude = open_levels[current_level-1] if current_level > 0 else baseline_level
+            
+            events.append([self.time_array[event_start], end_time, level_idx, amplitude])
+            
+            # Fill idealized trace for this final event
+            idealized[event_start:] = amplitude
+        
+        if plot_result:
+            self.plot_single_trace_result(events, idealized)
+        
+        self.idealized_trace = idealized
+        self.events = events
+        return events, idealized
+
+    def plot_single_trace_result(self, events, idealized):
+        """Plot results for a single trace"""
+        fig, ax = plt.subplots(figsize=(14, 6))
+                
+        # Plot original and idealized traces
+        ax.plot(self.time_array, self.trace, 'b-', alpha=0.3, linewidth=0.5)
+        ax.plot(self.time_array, idealized, 'r-', linewidth=0.5)
+        
+        # Plot level lines
+        for i, (level_name, level_value) in enumerate(self.levels.items()):
+            if level_name == 'Baseline':
+                ax.axhline(level_value, color='k', linestyle='--', alpha=0.5, label=level_name)
+            else:
+                ax.axhline(level_value, color=f'C{i+1}', linestyle='--', alpha=0.7, label=level_name)
+        
+        # Plot detection thresholds
+        for i, thresh in enumerate(self.detection_thresholds):
+            ax.axhline(thresh, color='gray', linestyle=':', alpha=0.5)
+        
+        ax.set_xlabel('Time (ms)')
+        ax.set_ylabel('Current (pA)')
+        ax.set_title(f'Event Detection: ({len(events)} events)')
+        ax.legend(handlelength=2, handletextpad=0.5, loc='upper left', ncol=len(self.levels))
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def calculate_event_durations(self, level_filter=None):
+        """
+        Calculate event durations for all detected events
+        
+        Parameters:
+        -----------
+        level_filter : int or list, optional
+            Only include events from specific level(s). None = all levels except baseline
+            
+        Returns:
+        --------
+        durations : dict
+            Dictionary with level names as keys, duration arrays as values
+        """
+        if not self.events:
+            raise ValueError("No events detected. Run detect_events() first.")
+        
+        durations = {}
+        level_names = list(self.levels.keys())
+        
+        # Initialize duration lists for each level
+        if level_filter is None:
+            # All levels
+            levels_to_analyze = range(0, len(self.levels))
+        elif isinstance(level_filter, int):
+            levels_to_analyze = [level_filter]
+        else:
+            levels_to_analyze = level_filter
+        
+        for level_idx in levels_to_analyze:
+            level_name = level_names[level_idx]
+            durations[level_name] = []
+        
+        # Collect durations from all events
+        for event in self.events:
+            start_time, end_time, level_idx, amplitude = event
+            
+            if level_idx in levels_to_analyze:
+                duration_ms = (end_time - start_time) * 1000  # Convert to ms
+                level_name = level_names[level_idx]
+                durations[level_name].append(duration_ms)
+        
+        return durations
+    
+    def plot_duration_histogram(self, level_filter=None, bins='auto', threshold=None, log_x=False, 
+                            sqrt_y_scale=False, fit_gaussian=True, separate_plots=False):
+        """
+        Plot histogram of event durations with optional gaussian fitting
+
+        Parameters:
+        -----------
+        level_filter : int, list, or None
+            Which levels to include (None = all open levels)
+        bins : int, str, or list
+            Number of histogram bins or bin edges
+        log_x : bool
+            Use log scale for x-axis with logarithmically spaced bins
+        sqrt_y_scale : bool
+            Use square-root scale for y-axis
+        fit_gaussian : bool
+            Fit gaussian curve to durations
+        separate_plots : bool
+            Plot each level separately vs. overlaid
+            
+        Returns:
+        --------
+        durations : dict
+            Dictionary with level names as keys, duration arrays as values
+        threshold : float or None
+            If fit_gaussian is True and level_filter includes baseline (0),
+            returns the threshold duration where the two Gaussians cross
+        """
+        durations = self.calculate_event_durations(level_filter)
+
+        if not any(durations.values()):
+            print("No events found for specified levels")
+            return durations, None
+
+        if separate_plots and len(durations) > 1:
+            n_levels = len(durations)
+            fig, axes = plt.subplots(n_levels, 1, figsize=(6, 3.5 * n_levels))
+            if n_levels == 1:
+                axes = [axes]
+        else:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            axes = [ax]
+
+        colors = plt.cm.Set2(np.linspace(0, 1, len(durations)))
+
+        # Flatten all durations to get global min/max
+        all_durations = np.concatenate([np.array(d) for d in durations.values() if len(d) > 0])
+        all_durations = all_durations[all_durations > 0]  # to avoid issues with log scale
+
+        # Global bin edges
+        if log_x:
+            global_min = np.min(all_durations)
+            global_max = np.max(all_durations)
+            bin_edges = np.logspace(np.log10(global_min), np.log10(global_max), 
+                                bins if isinstance(bins, int) else 50)
+        else:
+            bin_edges = np.histogram_bin_edges(all_durations, bins=bins)
+
+        for i, (level_name, level_durations) in enumerate(durations.items()):
+            if not level_durations:
+                continue
+
+            if separate_plots and len(durations) > 1:
+                current_ax = axes[i]
+                title_suffix = f" - {level_name}"
+            else:
+                current_ax = axes[0]
+                title_suffix = ""
+
+            level_durations = np.array(level_durations)
+            level_durations = level_durations[level_durations > 0]
+
+            counts, actual_bins, patches = current_ax.hist(
+                level_durations, bins=bin_edges, alpha=0.7,
+                color=colors[0], label=level_name,
+                density=False, edgecolor='white', linewidth=0.5)
+
+            if threshold is not None and level_name == 'Baseline':
+                # Mark the threshold on the plot
+                current_ax.axvline(threshold, color='r', linestyle='--', alpha=0.7,
+                                label=f'Threshold: {threshold:.2f} ms')
+                        
+            if log_x:
+                current_ax.set_xscale('log')
+                from matplotlib.ticker import ScalarFormatter
+                current_ax.xaxis.set_major_formatter(ScalarFormatter())
+                current_ax.xaxis.get_major_formatter().set_scientific(False)
+
+            if sqrt_y_scale:
+                current_ax.set_yscale("function", functions=(np.sqrt, np.square))
+                current_ax.set_ylabel('Count (sqrt-y scale)')
+            else:
+                current_ax.set_ylabel('Count')
+
+            current_ax.set_xlabel('Duration (ms)')
+            current_ax.set_title(f'Event Duration Distribution{title_suffix}', fontsize=13)
+            current_ax.legend(handlelength=1, handletextpad=0.5)
+            current_ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+        return durations
+
+    def calculate_level_probability(self, method='time_based'):
+        """
+        Calculate probability/occupancy for all levels including baseline
+        
+        Parameters:
+        -----------
+        method : str
+            'time_based': fraction of time spent in each state
+            'event_based': fraction of events that are in each state
+            
+        Returns:
+        --------
+        probabilities : dict
+            Probability for each level (keys: 'Baseline', 'L1', 'L2', etc.)
+        statistics : dict
+            Additional statistics
+        """
+        if not self.events or self.idealized_trace is None:
+            raise ValueError("No events detected. Run detect_events() first.")
+        
+        if method == 'time_based':
+            probabilities, statistics = self._calculate_probabilities_time_based()
+        elif method == 'event_based':
+            probabilities, statistics = self._calculate_probabilities_event_based()
+        else:
+            raise ValueError("Method must be 'time_based' or 'event_based'")
+        
+        return probabilities, statistics
+    
+    def _calculate_probabilities_time_based(self):
+        """Calculate probabilities based on fraction of time spent at each level"""
+        time_by_level = {level_name: 0 for level_name in self.levels.keys()}
+        
+        # Count time at each level
+        for level_name, level_value in self.levels.items():
+            # Count samples at this level
+            samples_at_level = np.sum(self.idealized_trace == level_value)
+            time_at_level = samples_at_level / self.sampling_freq
+            time_by_level[level_name] = time_at_level
+        
+        # Calculate total time
+        total_time = sum(time_by_level.values())
+        
+        # Calculate probabilities
+        probabilities = {name: time / total_time for name, time in time_by_level.items()}
+        
+        statistics = {
+            'total_recording_time_s': total_time,
+            'time_by_level_s': time_by_level,
+        }
+        
+        return probabilities, statistics
+    
+    def _calculate_probabilities_event_based(self):
+        """Calculate probabilities based on event frequency"""
+        events_by_level = {level_name: 0 for level_name in self.levels.keys()}
+        level_names = list(self.levels.keys())
+        
+        for event in self.events:
+            start_time, end_time, level_idx, amplitude = event
+            level_name = level_names[level_idx]
+            events_by_level[level_name] += 1
+        
+        total_events = sum(events_by_level.values())
+        probabilities = {name: count / total_events for name, count in events_by_level.items()}
+        
+        statistics = {
+            'total_events': total_events,
+            'events_by_level': events_by_level,
+        }
+        
+        return probabilities, statistics
+
+    def analyze_bursts(self, closed_duration_threshold):
+        """
+        Analyze channel activity in bursts/blocks separated by long closed intervals
+        
+        Parameters:
+        -----------
+        closed_duration_threshold : float
+            Threshold duration (in ms) for closed/baseline events
+            Closed durations longer than this threshold define the boundaries between bursts
+            
+        Returns:
+        --------
+        burst_data : list of dicts
+            List containing data for each burst, where each dict contains:
+            - 'start_time': burst start time (s)
+            - 'end_time': burst end time (s)
+            - 'duration': burst duration (ms)
+            - 'events': list of events in this burst
+            - 'open_probability': Po within this burst
+            - 'open_events': number of open events in burst
+            - 'open_time': total open time in burst (ms)
+        summary : dict
+            Summary statistics about the bursts
+        """
+        if not self.events:
+            raise ValueError("No events detected. Run detect_events() first.")
+        
+        burst_data = []
+        events = self.events
+
+        current_burst_events = []
+        burst_start_time = events[0][0]  # Start time of first event
+        
+        for i, event in enumerate(events):
+            start_time, end_time, level_idx, amplitude = event
+            
+            # If this is a baseline/closed event longer than threshold
+            if level_idx == 0 and (end_time - start_time) * 1000 > closed_duration_threshold:
+                # If we have events in the current burst, save it
+                if current_burst_events:
+                    # Last event in the burst is the current long closed event
+                    # We set its end time as the burst end
+                    burst_end_time = start_time
+                    
+                    # Calculate burst statistics
+                    burst_duration = (burst_end_time - burst_start_time) * 1000  # ms
+                    
+                    # Calculate open time and Po within burst
+                    open_time = 0
+                    open_events = 0
+                    
+                    for burst_event in current_burst_events:
+                        b_start, b_end, b_level, b_amp = burst_event
+                        if b_level > 0:  # Open state
+                            open_time += (b_end - b_start) * 1000  # ms
+                            open_events += 1
+                    
+                    burst_po = open_time / burst_duration if burst_duration > 0 else 0
+                    
+                    # Store burst data
+                    burst_data.append({
+                        'start_time': burst_start_time,
+                        'end_time': burst_end_time,
+                        'duration': burst_duration,
+                        'events': current_burst_events,
+                        'open_probability': burst_po,
+                        'open_events': open_events,
+                        'open_time': open_time
+                    })
+                    
+                    # Start a new burst after this long closed event
+                    current_burst_events = []
+                    burst_start_time = end_time
+                else:
+                    # No events in current burst, just move the start time
+                    burst_start_time = end_time
+            else:
+                # Add this event to the current burst
+                current_burst_events.append(event)
+        
+        # Handle final burst if there are any events
+        if current_burst_events:
+            burst_end_time = events[-1][1]  # End time of last event
+            burst_duration = (burst_end_time - burst_start_time) * 1000  # ms
+            
+            # Calculate open time and Po
+            open_time = 0
+            open_events = 0
+            for burst_event in current_burst_events:
+                b_start, b_end, b_level, b_amp = burst_event
+                if b_level > 0:  # Open state
+                    open_time += (b_end - b_start) * 1000  # ms
+                    open_events += 1
+            
+            burst_po = open_time / burst_duration if burst_duration > 0 else 0
+            
+            # Store burst data
+            burst_data.append({
+                'start_time': burst_start_time,
+                'end_time': burst_end_time,
+                'duration': burst_duration,
+                'events': current_burst_events,
+                'open_probability': burst_po,
+                'open_events': open_events,
+                'open_time': open_time
+            })
+        
+        # Calculate summary statistics
+        if burst_data:
+            n_bursts = len(burst_data)
+            mean_duration = np.mean([burst['duration'] for burst in burst_data])
+            mean_po = np.mean([burst['open_probability'] for burst in burst_data])
+            
+            summary = {
+                'n_bursts': n_bursts,
+                'mean_burst_duration_ms': mean_duration,
+                'mean_burst_po': mean_po,
+                'threshold_ms': closed_duration_threshold
+            }
+        else:
+            summary = {
+                'n_bursts': 0,
+                'threshold_ms': closed_duration_threshold
+            }
+        
+        # Print summary
+        print(f"Burst Analysis (threshold: {closed_duration_threshold} ms)")
+        print(f"Number of bursts: {summary['n_bursts']}")
+        if summary['n_bursts'] > 0:
+            print(f"Mean burst duration: {summary['mean_burst_duration_ms']:.2f} ms")
+            print(f"Mean Po within bursts: {summary['mean_burst_po']:.4f}")
+        
+        self.summary = summary
+        return burst_data, summary
+
+    def plot_burst_analysis(self, burst_data, max_bursts_to_plot=4):
+        """
+        Plot the results of burst analysis
+        
+        Parameters:
+        -----------
+        burst_data : list
+            Output from analyze_bursts method
+        max_bursts_to_plot : int
+            Maximum number of individual bursts to plot (default: 4)
+        """
+        if not burst_data:
+            print("No bursts found to plot")
+            return
+        
+        # Plot Po distribution for bursts
+        fig, ax = plt.subplots(figsize=(8, 3))
+        
+        po_values = [burst['open_probability'] for burst in burst_data]
+        ax.hist(po_values, bins=30, alpha=0.7, edgecolor='white')
+        ax.set_xlabel('P(open)')
+        ax.set_ylabel('Number of Bursts')
+        ax.set_title(f'Distribution of Open Probability within Bursts (n={len(burst_data)})', fontsize=13)
+        ax.axvline(np.mean(po_values), color='r', linestyle='--', 
+                label=f'Average within-burst P(open): {np.mean(po_values):.4f}')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Plot example bursts in 2x2 subplots
+        if max_bursts_to_plot > 0:
+            # Sort bursts by duration (descending) and select a subset
+            sorted_bursts = sorted(burst_data, key=lambda x: x['duration'], reverse=True)
+            bursts_to_plot = sorted_bursts[:min(max_bursts_to_plot, len(sorted_bursts))]
+            
+            # Create 2x2 subplot figure
+            fig, axes = plt.subplots(2, 2, figsize=(12, 5))
+            axes = axes.flatten()  # Flatten to make indexing easier
+            
+            for i, burst in enumerate(bursts_to_plot):
+                start_time = burst['start_time']
+                end_time = burst['end_time']
+                
+                # Convert to indices in the trace array
+                start_idx = np.searchsorted(self.time_array, start_time)
+                end_idx = np.searchsorted(self.time_array, end_time)
+                
+                # Get the section of the trace for this burst
+                time_section = self.time_array[start_idx:end_idx]
+                trace_section = self.trace[start_idx:end_idx]
+                idealized_section = self.idealized_trace[start_idx:end_idx]
+                
+                # Plot the burst
+                ax = axes[i]
+                ax.plot(time_section, trace_section, 'b-', alpha=0.4, label='Raw')
+                ax.plot(time_section, idealized_section, 'r-', linewidth=1, alpha=0.8, label='Idealized')
+                
+                ax.set_xlabel('Time (s)')
+                ax.set_ylabel('Current (pA)')
+                ax.set_title(f'Example burst {i+1} - Duration: {burst["duration"]:.1f} ms, Po: {burst["open_probability"]:.4f}', fontsize=12)
+                ax.grid(True, alpha=0.3)
+
+            # Hide any unused subplots if fewer than 4 bursts
+            for j in range(len(bursts_to_plot), 4):
+                axes[j].set_visible(False)
+            
+            plt.tight_layout()
+            plt.show()
+
+    def generate_analysis_report(self):
+        """
+        Generate a comprehensive analysis report
+        """
+        if not self.events:
+            print("No events detected. Run detect_events() first.")
+            return
+        
+        print("="*60)
+        print("SINGLE-CHANNEL ANALYSIS REPORT")
+        print("="*60)
+        
+        # Basic statistics
+        total_events = len(self.events)
+        print(f"\nBASIC STATISTICS:")
+        print(f"  Total events detected: {total_events}")
+        
+        # Current levels
+        print(f"\nCURRENT LEVELS:")
+        for level_name, level_value in self.levels.items():
+            print(f"  {level_name}: {level_value:.3f} pA")
+        
+        # Level probabilities
+        probabilities, prob_stats = self.calculate_level_probability()
+        print(f"\nLEVEL PROBABILITIES:")
+        for level_name, prob in probabilities.items():
+            print(f"  {level_name}: {prob:.4f} ({prob*100:.3f}%)")
+        
+        print(f"\nRECORDING TIME:")
+        print(f"  Total: {prob_stats['total_recording_time_s']:.3f} s")
+        for level_name, time_s in prob_stats['time_by_level_s'].items():
+            print(f"  {level_name}: {time_s:.3f} s")
+        
+        # Duration statistics
+        durations = self.calculate_event_durations()
+        print(f"\nEVENT DURATIONS:")
+        for level_name, level_durations in durations.items():
+            if level_durations:
+                mean_dur = np.mean(level_durations)
+                median_dur = np.median(level_durations)
+                std_dur = np.std(level_durations)
+                print(f"  {level_name}: {mean_dur:.2f} ± {std_dur:.2f} ms (median: {median_dur:.2f} ms, n={len(level_durations)})")
+        
+        print("="*60)
+
+
+
+def estimate_p_open(P_obs, n):
+    """Original function"""
+    P_obs = np.array(P_obs)
+    m = len(P_obs) - 1
+    
+    def loss(p):
+        P_model = [comb(n, k) * (p**k) * ((1 - p)**(n - k)) for k in range(m + 1)]
+        return np.sum((P_obs - P_model)**2)
+    
+    from scipy.optimize import minimize_scalar
+    result = minimize_scalar(loss, bounds=(0, 1), method='bounded')
+    p_estimate = result.x
+    residuals = P_obs - np.array([comb(n, k) * (p_estimate**k) * ((1 - p_estimate)**(n - k)) 
+                                    for k in range(m + 1)])
+    return p_estimate, residuals
+
+
+
+def print_p_open_results(p_estimate, residuals, P_obs, n):
+    """
+    Print a formatted summary of P(open) estimation results for the original function.
+    
+    Parameters:
+    - p_estimate: estimated single-channel open probability
+    - residuals: array of residuals from the fit
+    - P_obs: observed state probabilities
+    - n: number of channels
+    """
+    print("="*50)
+    print("SINGLE-CHANNEL P(OPEN) ESTIMATION")
+    print("="*50)
+    
+    print(f"Number of channels: {n}")
+    print(f"** Estimated instantaneous P(open): {p_estimate:.4f} **")
+    print()
+    
+    # Calculate model predictions for comparison
+    m = len(P_obs) - 1  # highest observed number of open channels
+    model_predictions = np.array([comb(n, k) * (p_estimate**k) * ((1 - p_estimate)**(n - k)) 
+                                 for k in range(m + 1)])
+    
+    # Show fit quality
+    print("FIT QUALITY:")
+    print("-" * 30)
+    print("State | Observed | Predicted | Residual")
+    print("-" * 30)
+    for k in range(len(P_obs)):
+        obs = P_obs[k]
+        pred = model_predictions[k]
+        res = residuals[k]
+        print(f"  {k:2d}  |  {obs:6.4f}  |  {pred:7.4f}  | {res:8.4f}")
+    
+    # Summary statistics
+    rss = np.sum(residuals**2)
+    rmse = np.sqrt(rss / len(residuals))
+    
+    print("-" * 30)
+    print(f"Residual sum of squares: {rss:.6f}")
+    print(f"Root mean square error:  {rmse:.6f}")
+    
+    # Interpretation
+    print()
+    print("INTERPRETATION:")
+    print("-" * 30)
+    print("• P(open) is the instantaneous probability that any single channel is open")
+    print("  at any given moment in time")
+    print("• Residuals show how well the binomial model fits your data")
+    print("  (Small residuals indicate good agreement)")
+    print("="*50)
 
 
 
