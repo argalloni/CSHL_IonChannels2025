@@ -1672,8 +1672,7 @@ class Trace():
                 for ax in axes:
                     ylims = ax.get_ylim()
                     ax.vlines(marker, *ylims, color='red', linestyle='-', linewidth=0.8)
-                    ax.text(marker, ylims[1], label, fontsize=10, color='red', ha='center', va='bottom')
-        
+                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1] + 0.1), fontsize=10, color='red', ha='center', va='bottom')
         plt.tight_layout()
         
         # Return appropriate axes
@@ -2209,6 +2208,51 @@ class Trace():
         """
         import copy as copy_module
         return copy_module.deepcopy(self)
+
+
+def combine_traces_across_files(data_files, average_across_sweeps=True):
+    """
+    Combine multiple traces from Axon files into a single Trace object.
+    """
+    # Lists to store averaged traces
+    combined_current_traces = []
+    combined_voltage_traces = []
+    combined_ttl_traces = []
+
+    # Loop through each file
+    for filename in data_files:    
+        trace = Trace.from_axon_file(filename=filename, 
+                                    load_voltage=True,
+                                    recording_mode="I clamp",
+                                    load_ttl=True,
+                                    units=['pA', 'mV', 'V'])
+        if average_across_sweeps:
+            avg_current = np.mean(trace.current_data, axis=0)
+            avg_voltage = np.mean(trace.voltage_data, axis=0)
+            combined_current_traces.append(avg_current)
+            combined_voltage_traces.append(avg_voltage)
+            combined_ttl_traces.append(trace.ttl_data)
+        else:
+            combined_current_traces.append(trace.current_data)
+            combined_voltage_traces.append(trace.voltage_data)
+            combined_ttl_traces.append(trace.ttl_data)
+
+    # Stack averaged traces into a 2D array and create a new Trace object
+    combined_current = np.vstack(combined_current_traces)
+    combined_voltage = np.vstack(combined_voltage_traces)
+    combined_ttl = np.vstack(combined_ttl_traces)
+    filename = 'averaged_traces' if average_across_sweeps else 'combined_traces'
+
+    traces = Trace(current_data=combined_current,
+                    sampling_interval=trace.sampling,
+                    current_unit=trace.current_unit,
+                    filename=filename,
+                    voltage_data=combined_voltage,
+                    voltage_unit=trace.voltage_unit,
+                    ttl_data=combined_ttl,
+                    ttl_unit=trace.ttl_unit)
+    return traces
+
 
 
 ###############################
@@ -3210,7 +3254,6 @@ class MultiLevelEventDetector:
         print("="*60)
 
 
-
 def estimate_p_open(P_obs, n):
     """Original function"""
     P_obs = np.array(P_obs)
@@ -3226,7 +3269,6 @@ def estimate_p_open(P_obs, n):
     residuals = P_obs - np.array([comb(n, k) * (p_estimate**k) * ((1 - p_estimate)**(n - k)) 
                                     for k in range(m + 1)])
     return p_estimate, residuals
-
 
 
 def print_p_open_results(p_estimate, residuals, P_obs, n):
