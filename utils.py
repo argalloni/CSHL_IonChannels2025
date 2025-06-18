@@ -896,25 +896,23 @@ class Trace():
                   filename=Path(filename).name, voltage_data=voltage_data, ttl_data=ttl_data,
                   concatenate_sweeps=concatenate_sweeps)
 
-    def crop(self, timepoint: float, window: float = None, time_units: str = 's', 
+    def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True):
         """
-        Crop the trace data around specified timepoint(s) and return a new Trace object.
+        Crop the trace data between two timepoints and return a new Trace object.
         
         Parameters
         ----------
-        timepoint : float
-            The center timepoint for cropping (or start timepoint if timepoint_2 is provided).
-            If timepoint_2 is None, this acts as a one-sided crop boundary.
+        timepoint : float, optional
+            The first timepoint for cropping. If None, defaults to 0 (start of trace).
         window : float, optional
-            The window size around the timepoint. If timepoint_2 is provided, this parameter is ignored.
-            For single timepoint: data is cropped from (timepoint - window/2) to (timepoint + window/2).
+            The window size from the first timepoint. If timepoint_2 is provided, this parameter is ignored.
+            Sets the second timepoint as (timepoint + window).
         time_units : str, default='s'
             Time units for timepoint, window, and timepoint_2. Options: 's' (seconds), 'ms' (milliseconds).
         timepoint_2 : float, optional
             Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
-            The window parameter is ignored when this is specified.
-            If None while timepoint is not None, performs one-sided cropping.
+            If None and window is None, defaults to end of trace.
         preserve_metadata : bool, default=True
             Whether to preserve metadata (events, excluded_sweeps, etc.) in the new Trace object.
         
@@ -926,61 +924,53 @@ class Trace():
         Raises
         ------
         ValueError
-            If no current data is available, if timepoints are out of bounds, if window is invalid,
-            or if time units are not recognized.
-        
-        Notes
-        -----
-        One-sided cropping behavior:
-        - If timepoint_2 is None: crops from timepoint to end of trace
-        - If timepoint is None and timepoint_2 is provided: crops from start to timepoint_2
+            If no current data is available, if timepoints are out of bounds, or if time units are not recognized.
         """
         if self.current_data is None:
             raise ValueError("No current data available for cropping")
         
         # Convert time units to seconds
         if time_units in ['s', 'seconds']:
-            timepoint_s = timepoint if timepoint is not None else None
-            window_s = window if window is not None else None
-            timepoint_2_s = timepoint_2 if timepoint_2 is not None else None
+            conversion_factor = 1.0
         elif time_units in ['ms', 'milliseconds']:
-            timepoint_s = timepoint / 1000.0 if timepoint is not None else None
-            window_s = window / 1000.0 if window is not None else None
-            timepoint_2_s = timepoint_2 / 1000.0 if timepoint_2 is not None else None
+            conversion_factor = 1000.0
         else:
             raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
         
+        # Convert all inputs to seconds
+        timepoint_s = timepoint / conversion_factor if timepoint is not None else 0.0
+        window_s = window / conversion_factor if window is not None else None
+        timepoint_2_s = timepoint_2 / conversion_factor if timepoint_2 is not None else None
+        
         # Determine start and end times
-        if timepoint_s is not None and timepoint_2_s is not None:
-            # Crop between two timepoints
-            start_time = min(timepoint_s, timepoint_2_s)
-            end_time = max(timepoint_s, timepoint_2_s)
-            crop_type = "two_points"
-        elif timepoint_s is not None and timepoint_2_s is None:
-            # One-sided crop: from timepoint to end
-            start_time = timepoint_s
-            end_time = self.total_time
-            crop_type = "from_timepoint"
-        elif timepoint_s is None and timepoint_2_s is not None:
-            # One-sided crop: from start to timepoint_2
-            start_time = 0.0
+        start_time = timepoint_s
+        
+        if timepoint_2_s is not None:
+            # Use explicit second timepoint
             end_time = timepoint_2_s
-            crop_type = "to_timepoint_2"
+            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
+        elif window_s is not None:
+            # Use window to calculate end time
+            end_time = start_time + window_s
+            crop_info = f"_crop_{timepoint if timepoint is not None else 0:.3f}+{window:.3f}{time_units}"
         else:
-            # Both timepoints are None, use window-based cropping
-            if window_s is None:
-                raise ValueError("Either 'window', 'timepoint_2', or one-sided cropping must be specified")
-            if window_s <= 0:
-                raise ValueError("Window size must be positive")
-            
-            # This case shouldn't happen with current logic, but keeping for backwards compatibility
-            raise ValueError("At least one timepoint must be specified for cropping")
+            # Default to end of trace
+            end_time = self.total_time
+            crop_info = f"_crop_{timepoint if timepoint is not None else 0:.3f}toEnd{time_units}"
+        
+        # Ensure start_time < end_time
+        if start_time > end_time:
+            start_time, end_time = end_time, start_time
         
         # Validate time bounds
         if start_time < 0:
-            raise ValueError(f"Start time ({start_time:.6f} s) is before data start (0 s)")
+            start_time = 0.0
+            print(f"Warning: Start time adjusted to 0 s (was {start_time:.6f} s)")
+        
         if end_time > self.total_time:
-            raise ValueError(f"End time ({end_time:.6f} s) exceeds data duration ({self.total_time:.6f} s)")
+            end_time = self.total_time
+            print(f"Warning: End time adjusted to {self.total_time:.6f} s (was {end_time:.6f} s)")
+        
         if start_time >= end_time:
             raise ValueError("Start time must be less than end time")
         
@@ -1013,18 +1003,6 @@ class Trace():
             cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
         
         # Create new filename indicating the crop
-        if crop_type == "two_points":
-            if timepoint_2 is not None:
-                crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
-            else:
-                crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
-        elif crop_type == "from_timepoint":
-            crop_info = f"_crop_from{timepoint:.3f}{time_units}"
-        elif crop_type == "to_timepoint_2":
-            crop_info = f"_crop_to{timepoint_2:.3f}{time_units}"
-        else:
-            crop_info = f"_crop_{timepoint:.3f}±{window/2:.3f}{time_units}"
-        
         new_filename = self.filename.replace('.', crop_info + '.') if self.filename else f"cropped_trace{crop_info}.dat"
         
         # Create new Trace object
@@ -2298,7 +2276,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
     all_currents = traces.flatten()
     
     # Create histogram
-    counts, bin_edges = np.histogram(all_currents, bins=bins, density=True)
+    counts, bin_edges = np.histogram(all_currents, bins=bins, density=False)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
     
     # Store original histogram for plotting
@@ -2394,7 +2372,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
                     mask = np.abs(working_data - mean_fit) > removal_factor * std_fit
                     working_data = working_data[mask]
                     if len(working_data) > 0:
-                        working_counts, _ = np.histogram(working_data, bins=bin_centers, density=True)
+                        working_counts, _ = np.histogram(working_data, bins=bin_centers, density=False)
                     else:
                         working_counts = np.zeros_like(working_counts)
                         
@@ -2448,7 +2426,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         
         def plot_histogram_with_gaussians(ax, title_suffix="", ylim=None):
             """Helper function to create histogram plot with Gaussians"""
-            ax.hist(all_currents, bins=bins, density=True, alpha=0.9, color='gray', edgecolor='white', label='Data')
+            ax.hist(all_currents, bins=bins, density=False, alpha=0.9, color='gray', edgecolor='white', label='Data')
             
             colors = plt.cm.Set1.colors[:len(fitted_levels)]
             if fit_stats.get('fit_success', False) and fitted_levels:
@@ -2467,7 +2445,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
                             label=f'Level {i+1}: {level:.2f} pA')
             
             ax.set_xlabel('Current (pA)')
-            ax.set_ylabel('Probability Density')
+            ax.set_ylabel('Counts (number of data points)')
             ax.set_title(f'Current Histogram with {len(fitted_levels)} Fitted Levels{title_suffix}')
             ax.legend(handlelength=2, handletextpad=0.5, frameon=False)
             ax.grid(True, alpha=0.3)
@@ -2486,7 +2464,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         
         # Plot 2: Zoomed histogram (top right) - half the y-axis range
         max_ylim = ax1.get_ylim()[1]
-        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / 30))
+        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / 40))
         
         # Plot 3: Sample traces with detected levels (bottom, spanning both columns)
         ax3.plot(traces.T, alpha=0.8, color='black', linewidth=0.5)
@@ -2759,7 +2737,7 @@ class MultiLevelEventDetector:
                 
         # Plot original and idealized traces
         ax.plot(self.time_array, self.trace, 'b-', alpha=0.3, linewidth=0.5)
-        ax.plot(self.time_array, idealized, 'r-', linewidth=0.5)
+        ax.plot(self.time_array, idealized, 'r-', linewidth=0.8)
         
         # Plot level lines
         for i, (level_name, level_value) in enumerate(self.levels.items()):
