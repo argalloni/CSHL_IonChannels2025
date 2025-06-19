@@ -896,6 +896,28 @@ class Trace():
                   filename=Path(filename).name, voltage_data=voltage_data, ttl_data=ttl_data,
                   concatenate_sweeps=concatenate_sweeps)
 
+    def remove_sweeps(self, sweeps: int | list[int]):
+        """
+        Remove sweeps from the Trace object.
+        Parameters
+        ----------
+        sweeps : list
+            List of sweep numbers to be removed.
+        """
+        if isinstance(sweeps, int):
+            sweeps = [sweeps]
+
+        if len(sweeps) == 0:
+            print("No sweeps to remove.")
+            return
+        
+        # Remove sweeps from the data
+        self.current_data = np.delete(self.current_data, sweeps, axis=0)
+        self.voltage_data = np.delete(self.voltage_data, sweeps, axis=0)
+        self.ttl_data = np.delete(self.ttl_data, sweeps, axis=0)
+        print(f'Removed sweep(s) {sweeps} from the trace.')
+        print(f"{self.num_sweeps} sweeps remaining.")
+
     def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True):
         """
@@ -1649,8 +1671,8 @@ class Trace():
             if marker is not None:
                 for ax in axes:
                     ylims = ax.get_ylim()
-                    ax.vlines(marker, *ylims, color='red', linestyle='-', linewidth=0.8)
-                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1] + 0.1), fontsize=10, color='red', ha='center', va='bottom')
+                    ax.vlines(marker, ylims[0]*0.8,ylims[1]*0.8, color='red', linestyle='-', linewidth=0.8)
+                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1]*0.9), fontsize=10, color='red', ha='center', va='bottom')
         plt.tight_layout()
         
         # Return appropriate axes
