@@ -488,221 +488,6 @@ class Trace():
                 concatenate_sweeps=concatenate_sweeps)
 
     @classmethod
-    def from_axon_file2(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
-                    units: str | list=None, load_voltage: bool=False, load_ttl: bool=False,
-                    concatenate_sweeps: bool=False):
-        ''' Loads data from an AXON .abf file.
-
-        Parameters
-        ----------
-        filename: string
-            Path of a .abf file.
-        channels: int or list, default=0
-            The recording channel(s) to load. If int, loads single channel as current data.
-            If list, channels are assigned as: [current, voltage, ttl] based on load_voltage and load_ttl flags.
-        scaling: float or list, default=1.0
-            Scaling factor(s) applied to the data. If list, must match number of channels.
-        unit: str or list, default=None
-            Data unit(s), to be set when using scaling factor. If list, must match number of channels.
-        load_voltage: bool, default=False
-            Whether to load voltage data from a second channel.
-        load_ttl: bool, default=False
-            Whether to load TTL data from a third channel.
-        concatenate_sweeps: bool, default=True
-            Whether to concatenate sweeps or keep them separate.
-
-        Returns
-        -------
-        Trace
-            An initialized Trace object.
-
-        Raises
-        ------
-        Exception
-            If the file is not a valid .abf file.
-        IndexError
-            When the selected channel does not exist in the file.
-        ValueError
-            When parameters don't match the number of channels.
-        '''
-        if not Path(filename).suffix.lower() == '.abf':
-            raise Exception('Incompatible file type. Method only loads .abf files.')
-
-        import pyabf
-        abf_file = pyabf.ABF(filename)
-        
-        # Handle different input types for channels
-        if isinstance(channels, int):
-            channels_to_load = [channels]
-            if load_voltage:
-                # Only add voltage channel if it exists
-                if channels + 1 in abf_file.channelList:
-                    voltage_channel = channels + 1
-                    channels_to_load.append(voltage_channel)
-                elif len(abf_file.channelList) > 1:
-                    voltage_channel = abf_file.channelList[1]
-                    channels_to_load.append(voltage_channel)
-                # If no additional channels available, we'll try sweepC later
-            if load_ttl:
-                # Only add TTL channel if it exists
-                if channels + 2 in abf_file.channelList:
-                    ttl_channel = channels + 2
-                    channels_to_load.append(ttl_channel)
-                elif len(abf_file.channelList) > 2:
-                    ttl_channel = abf_file.channelList[-1]
-                    channels_to_load.append(ttl_channel)
-        else:
-            channels_to_load = channels
-
-        # Validate channels exist
-        for ch in channels_to_load:
-            if ch not in abf_file.channelList:
-                raise IndexError(f'Channel {ch} does not exist. Available channels: {abf_file.channelList}')
-
-        # Handle scaling and unit parameters
-        num_expected_channels = 1  # Always have current
-        if load_voltage:
-            num_expected_channels += 1
-        if load_ttl:
-            num_expected_channels += 1
-        
-        if isinstance(scaling, (int, float)):
-            scaling = [scaling] * num_expected_channels
-        elif len(scaling) != num_expected_channels:
-            raise ValueError(f"Number of scaling factors ({len(scaling)}) must match expected number of channels ({num_expected_channels})")
-
-        if units is None:
-            # Get units for available channels, fill in defaults for missing ones
-            units = []
-            for i, ch in enumerate(channels_to_load):
-                units.append(abf_file.adcUnits[ch])
-            # Add default units for voltage/TTL if they'll be loaded from sweepC
-            if load_voltage and len(units) < 2:
-                units.append('mV')
-            if load_ttl and len(units) < 3:
-                units.append('V')
-        elif isinstance(units, str):
-            units = [units] * num_expected_channels
-        elif len(units) != num_expected_channels:
-            raise ValueError(f"Number of units ({len(units)}) must match expected number of channels ({num_expected_channels})")
-
-        # Load data - handle multiple sweeps
-        if concatenate_sweeps:
-            # Original behavior - concatenate all sweeps
-            current_data = abf_file.data[channels_to_load[0]] * scaling[0]
-            voltage_data = None
-            ttl_data = None
-            
-            # Try to load voltage data from specified channel first
-            if load_voltage and len(channels_to_load) > 1:
-                try:
-                    voltage_data = abf_file.data[channels_to_load[1]] * scaling[1]
-                except (IndexError, KeyError):
-                    # If channel approach fails, try sweepC
-                    print(f"Warning: Could not load voltage from channel {channels_to_load[1]}, trying sweepC...")
-                    voltage_data = None
-            
-            # Fallback: Check for voltage in sweepC if requested but not found
-            if load_voltage and voltage_data is None:
-                try:
-                    abf_file.setSweep(0)  # Set to first sweep to access sweepC
-                    if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
-                        # For concatenated sweeps, we need to collect sweepC from all sweeps
-                        all_voltage_data = []
-                        for sweep_idx in range(abf_file.sweepCount):
-                            abf_file.setSweep(sweep_idx)
-                            if abf_file.sweepC is not None:
-                                sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
-                                all_voltage_data.append(abf_file.sweepC * sweep_scaling)
-                        
-                        if all_voltage_data:
-                            voltage_data = np.concatenate(all_voltage_data)
-                            print("Successfully loaded voltage data from sweepC")
-                except Exception as e:
-                    print(f"Warning: Could not load voltage from sweepC: {e}")
-            
-            # Load TTL data
-            if load_ttl and len(channels_to_load) > 2:
-                try:
-                    ttl_data = abf_file.data[channels_to_load[2]] * scaling[2]
-                except (IndexError, KeyError):
-                    print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
-                    
-        else:
-            # New behavior - keep sweeps separate
-            abf_file.setSweep(0)  # Start with first sweep to get dimensions
-            sweep_length = len(abf_file.sweepY)
-            num_sweeps = abf_file.sweepCount
-            
-            # Initialize arrays for all sweeps
-            current_data = np.zeros((num_sweeps, sweep_length))
-            voltage_data = None
-            ttl_data = None
-            
-            if load_voltage:
-                voltage_data = np.zeros((num_sweeps, sweep_length))
-            if load_ttl:
-                ttl_data = np.zeros((num_sweeps, sweep_length))
-            
-            # Load each sweep
-            for sweep_idx in range(num_sweeps):
-                # Load current data
-                abf_file.setSweep(sweep_idx, channel=channels_to_load[0])
-                current_data[sweep_idx] = abf_file.sweepY * scaling[0]
-                
-                # Load voltage data
-                if load_voltage:
-                    voltage_loaded = False
-                    
-                    # Try loading from specified channel first
-                    if len(channels_to_load) > 1:
-                        try:
-                            abf_file.setSweep(sweep_idx, channel=channels_to_load[1])
-                            voltage_data[sweep_idx] = abf_file.sweepY * scaling[1]
-                            voltage_loaded = True
-                        except (IndexError, KeyError):
-                            pass
-                    
-                    # Fallback to sweepC if channel approach failed
-                    if not voltage_loaded:
-                        try:
-                            abf_file.setSweep(sweep_idx, channel=channels_to_load[0])  # Reset to current channel
-                            if hasattr(abf_file, 'sweepC') and abf_file.sweepC is not None:
-                                sweep_scaling = scaling[1] if len(scaling) > 1 else 1.0
-                                voltage_data[sweep_idx] = abf_file.sweepC * sweep_scaling
-                                voltage_loaded = True
-                        except Exception:
-                            pass
-                    
-                    # If still no voltage data, warn user
-                    if not voltage_loaded and sweep_idx == 0:  # Only warn once
-                        print("Warning: Could not load voltage data from any source")
-                        voltage_data = None
-                        break
-                        
-                # Load TTL data
-                if load_ttl and len(channels_to_load) > 2:
-                    try:
-                        abf_file.setSweep(sweep_idx, channel=channels_to_load[2])
-                        ttl_data[sweep_idx] = abf_file.sweepY * scaling[2]
-                    except (IndexError, KeyError):
-                        if sweep_idx == 0:  # Only warn once
-                            print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
-                            ttl_data = None
-                            break
-        
-        # Set units
-        current_unit = units[0]
-        voltage_unit = units[1] if len(units) > 1 else 'mV'
-        ttl_unit = units[2] if len(units) > 2 else 'V'
-
-        return cls(current_data=current_data, sampling_interval=1/abf_file.sampleRate, 
-                current_unit=current_unit, filename=Path(filename).name,
-                voltage_data=voltage_data, voltage_unit=voltage_unit,
-                ttl_data=ttl_data, ttl_unit=ttl_unit,
-                concatenate_sweeps=concatenate_sweeps)
-
-    @classmethod
     def from_heka_file(cls, filename: str, rectype: str, group: int=0, load_series: list=[], exclude_series: list=[], 
                        exclude_sweeps: dict={}, scaling: float=1, unit: str=None, resample: bool=True,
                        concatenate_sweeps: bool=True):
@@ -918,6 +703,19 @@ class Trace():
         print(f'Removed sweep(s) {sweeps} from the trace.')
         print(f"{self.num_sweeps} sweeps remaining.")
 
+    def copy(self):
+        """
+        Create a deep copy of the Trace object.
+        
+        Returns
+        -------
+        Trace
+            A new Trace object with copied data arrays and attributes.
+            All data is deep copied to prevent unintended modifications.
+        """
+        import copy as copy_module
+        return copy_module.deepcopy(self)
+
     def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True):
         """
@@ -1075,6 +873,198 @@ class Trace():
                     setattr(cropped_trace, attr, getattr(self, attr))
         
         return cropped_trace
+
+    def plot(self, plot_current=True, plot_voltage=False, plot_ttl=False, height_ratios=None, 
+            marker_1=None, marker_2=None, time_units='s', sweep=None, plot_mean=False):
+        ''' Plots the trace with optional markers
+        
+        Parameters
+        ----------
+        plot_current: bool, default=True
+            Whether to plot current data (if available).
+        plot_voltage: bool, default=False
+            Whether to plot voltage data as well (if available).
+        plot_ttl: bool, default=False
+            Whether to plot TTL data as well (if available).
+        height_ratios: tuple, default=None
+            Height ratios for subplots. If None, defaults based on number of plots:
+            - Single plot: N/A
+            - Two plots: (3, 1) or (1, 1) if both are non-current
+            - Three plots: (3, 1, 1) if current included, (1, 1, 1) if current not included
+        marker_1: float, default=None
+            Time position for first marker. If provided, adds a vertical line at this position.
+        marker_2: float, default=None
+            Time position for second marker. If provided, adds a vertical line at this position.
+        time_units: str, default='s'
+            Units for marker positions. Options: 's' (seconds), 'ms' (milliseconds).
+        sweep: int, 'all', or None, default=None
+            Which sweep to plot if data is not concatenated. If None, plots first sweep.
+            If 'all', plots all sweeps superimposed with mean in red.
+        plot_mean: bool, default=False
+            Whether to plot the mean trace in red when sweep='all'.
+        
+        Returns
+        -------
+        matplotlib.axes or tuple of matplotlib.axes
+            Single axis if only one channel plotted, tuple of axes if multiple plots.
+            Order depends on which channels are plotted.
+            
+        Raises
+        ------
+        ValueError
+            If no channels are selected for plotting or if required data is not available.
+        '''
+        # Check that at least one channel is selected for plotting
+        if not any([plot_current, plot_voltage, plot_ttl]):
+            raise ValueError("At least one channel must be selected for plotting")
+        
+        # Check data availability and what we can actually plot
+        has_current = self.current_data is not None and plot_current
+        has_voltage = self.voltage_data is not None and plot_voltage
+        has_ttl = self.ttl_data is not None and plot_ttl
+        
+        # Validate that we have data for the requested channels
+        channels_to_plot = []
+        channel_data = []
+        channel_labels = []
+        channel_units = []
+        
+        if plot_current:
+            if self.current_data is None:
+                raise ValueError("Current data not available for plotting")
+            channels_to_plot.append('current')
+            channel_labels.append('Current')
+            channel_units.append(self.current_unit)
+        
+        if plot_voltage:
+            if self.voltage_data is None:
+                raise ValueError("Voltage data not available for plotting")
+            channels_to_plot.append('voltage')
+            channel_labels.append('Voltage')
+            channel_units.append(self.voltage_unit)
+        
+        if plot_ttl:
+            if self.ttl_data is None:
+                raise ValueError("TTL data not available for plotting")
+            channels_to_plot.append('ttl')
+            channel_labels.append('TTL')
+            channel_units.append(self.ttl_unit)
+        
+        # Convert marker positions to seconds if needed
+        markers = []
+        for marker in [marker_1, marker_2]:
+            if marker is not None:
+                markers.append(marker)
+            else:
+                markers.append(None)
+        
+        marker_1_s, marker_2_s = markers
+        
+        # Determine what data to plot based on sweep parameter
+        def get_data_for_channel(channel_name):
+            if channel_name == 'current':
+                data = self.current_data
+            elif channel_name == 'voltage':
+                data = self.voltage_data
+            elif channel_name == 'ttl':
+                data = self.ttl_data
+            
+            if self.concatenate_sweeps:
+                return data
+            else:
+                # Handle separate sweeps
+                if sweep is None:
+                    return data[0]  # First sweep
+                elif sweep == 'all':
+                    return data  # All sweeps
+                elif isinstance(sweep, int):
+                    if sweep >= self.num_sweeps:
+                        raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
+                    return data[sweep][np.newaxis, :] # Specific sweep
+                elif isinstance(sweep, list or tuple):
+                    idx = range(sweep[0], sweep[1])
+                    return data[idx]
+                else:
+                    raise ValueError("sweep must be None, 'all', or a valid sweep index")
+        
+        # Get time axis
+        time_axis = self.time
+        if time_units in ['ms', 'milliseconds']:
+            time_axis = time_axis * 1000
+        
+        # Determine number of subplots and height ratios
+        num_plots = len(channels_to_plot)
+        
+        if height_ratios is None:
+            if num_plots == 1:
+                height_ratios = None
+            elif num_plots == 2:
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1)
+                else:
+                    height_ratios = (1, 1)
+            else:  # num_plots == 3
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1, 1)
+                else:
+                    height_ratios = (1, 1, 1)
+        
+        # Create subplots
+        if num_plots == 1:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            axes = [ax]
+        else:
+            fig, axes = plt.subplots(num_plots, 1, figsize=(10, 2 + 2*num_plots), 
+                                    sharex=True, height_ratios=height_ratios)
+            if not isinstance(axes, (list, np.ndarray)):
+                axes = [axes]
+        
+        # Plot each requested channel
+        for i, (channel_name, label, unit) in enumerate(zip(channels_to_plot, channel_labels, channel_units)):
+            ax = axes[i]
+            data_to_plot = get_data_for_channel(channel_name)
+            
+            # Plot the data
+            if not self.concatenate_sweeps:
+                # Plot all sweeps
+                if plot_mean:
+                    # Plot individual sweeps with transparency
+                    for sweep_idx in range(data_to_plot.shape[0]):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='gray', alpha=0.3, linewidth=0.5)
+                    # Plot mean in red
+                    mean_data = np.mean(data_to_plot, axis=0)
+                    ax.plot(time_axis, mean_data, color='red', linewidth=1, label='Mean')
+                else:
+                    # Plot all sweeps in black
+                    for sweep_idx in range(data_to_plot.shape[0]):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
+
+            # Set labels and formatting
+            ax.set_ylabel(f'{label} ({unit})')
+            ax.grid(True, alpha=0.3)
+        
+        # Set x-axis label on bottom subplot
+        if time_units in ['ms', 'milliseconds']:
+            axes[-1].set_xlabel('Time (ms)')
+        else:
+            axes[-1].set_xlabel('Time (s)')
+        
+        # Add markers to all subplots
+        for marker, label in [(marker_1_s, 'marker 1'), (marker_2_s, 'marker 2')]:
+            if marker is not None:
+                for ax in axes:
+                    ylims = ax.get_ylim()
+                    ax.vlines(marker, ylims[0]*0.8,ylims[1]*0.8, color='red', linestyle='-', linewidth=0.8)
+                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1]*0.9), fontsize=10, color='red', ha='center', va='bottom')
+        plt.tight_layout()
+        
+        # Return appropriate axes
+        if num_plots == 1:
+            return axes[0]
+        else:
+            return tuple(axes)
 
     def get_step_events(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
                         polarity: str = 'positive', time_units: str = 's', sweep: int = None):
@@ -1299,7 +1289,247 @@ class Trace():
                 if sweep >= data.shape[0]:
                     raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
                 return find_events_in_trace(data[sweep])
-           
+
+    def detect_spikes(self, threshold: float = -20, min_height: float = None, 
+                    min_distance: int = None, prominence: float = None,
+                    width_range: tuple = None, plot: bool = False, 
+                    return_properties: bool = True, time_units: str = 's'):
+        """
+        Detect action potentials (spikes) in voltage data using scipy.signal.find_peaks.
+        
+        Parameters
+        ----------
+        threshold : float, default=-20
+            Minimum voltage threshold for spike detection (in mV or current voltage units).
+            Spikes must cross this threshold to be detected.
+        min_height : float, optional
+            Minimum height of peaks above baseline. If None, uses threshold value.
+        min_distance : int, optional
+            Minimum number of samples between peaks. If None, automatically calculated
+            based on sampling rate (default: ~2ms refractory period).
+        prominence : float, optional
+            Required prominence of peaks. Helps filter out noise and small deflections.
+            If None, automatically set to 1/4 of the voltage range.
+        width_range : tuple, optional
+            (min_width, max_width) range for spike width in samples.
+            If None, uses reasonable defaults based on sampling rate.
+        plot : bool, default=False
+            Whether to create a raster plot showing spike times across sweeps.
+        return_properties : bool, default=False
+            Whether to return additional spike properties (heights, widths, etc.).
+        voltage_units : str, default='auto'
+            Units of voltage data. If 'auto', attempts to determine from voltage_unit attribute.
+        
+        Returns
+        -------
+        spike_times : np.ndarray or list
+            If concatenate_sweeps=True: 1D array of spike times in seconds.
+            If concatenate_sweeps=False: List of arrays, one per sweep, containing spike times.
+        spike_properties : dict, optional
+            Additional spike properties if return_properties=True. Contains:
+            - 'heights': Peak amplitudes
+            - 'widths': Spike widths
+            - 'prominences': Peak prominences
+            - 'sweep_indices': Which sweep each spike belongs to (if applicable)
+        
+        Raises
+        ------
+        ValueError
+            If no voltage data is available or if parameters are invalid.
+        ImportError
+            If required scipy modules are not available.
+        
+        Examples
+        --------
+        # Basic spike detection
+        spike_times = trace.detect_spikes(threshold=-30, plot=True)
+        
+        # More stringent detection with additional parameters
+        spikes, props = trace.detect_spikes(
+            threshold=-25, 
+            prominence=5, 
+            min_distance=100,  # ~2ms at 50kHz
+            return_properties=True,
+            plot=True
+        )
+        """
+        # Validate voltage data availability
+        if self.voltage_data is None:
+            raise ValueError("No voltage data available for spike detection. "
+                            "Load voltage data using load_voltage=True when creating the Trace.")
+        
+        # Set default parameters based on sampling rate
+        if min_distance is None:
+            # Default to ~2ms refractory period
+            min_distance = max(1, int(0.002 / self.sampling))
+        
+        if width_range is None:
+            # Default spike width range: 0.5ms to 3ms
+            min_width = max(1, int(0.0005 / self.sampling))
+            max_width = int(0.003 / self.sampling)
+            width_range = (min_width, max_width)
+        
+        if min_height is None:
+            min_height = threshold
+        
+        # Auto-set prominence if not provided
+        if prominence is None:
+            if self.concatenate_sweeps:
+                voltage_range = np.ptp(self.voltage_data)
+            else:
+                voltage_range = np.ptp(self.voltage_data.flatten())
+            prominence = voltage_range / 4  # Quarter of the voltage range
+        
+        # Prepare storage for results
+        all_spike_times = []
+        all_spike_properties = {
+            'heights': [],
+            'widths': [],
+            'prominences': [],
+            'sweep_indices': [],
+            'spike_counts': []
+        }
+        
+        if self.concatenate_sweeps:
+            # Handle concatenated data
+            peaks, properties = signal.find_peaks(
+                self.voltage_data,
+                height=min_height,
+                distance=min_distance,
+                prominence=prominence,
+                width=width_range
+            )
+            
+            # Convert peak indices to time
+            spike_times = peaks * self.sampling
+            all_spike_times = spike_times
+            
+            if return_properties:
+                all_spike_properties['heights'] = properties.get('peak_heights', [])
+                all_spike_properties['widths'] = properties.get('widths', []) * self.sampling
+                all_spike_properties['prominences'] = properties.get('prominences', [])
+                all_spike_properties['sweep_indices'] = np.zeros(len(peaks))  # All from sweep 0
+                all_spike_properties['spike_counts'] = len(peaks)
+            
+        else:
+            # Handle separate sweeps
+            for sweep_idx in range(self.num_sweeps):
+                sweep_voltage = self.voltage_data[sweep_idx]
+                
+                peaks, properties = signal.find_peaks(
+                    sweep_voltage,
+                    height=min_height,
+                    distance=min_distance,
+                    prominence=prominence,
+                    width=width_range
+                )
+                
+                # Convert peak indices to time
+                sweep_spike_times = peaks * self.sampling
+                all_spike_times.append(sweep_spike_times)
+                
+                if return_properties:
+                    all_spike_properties['heights'].extend(properties.get('peak_heights', []))
+                    all_spike_properties['widths'].extend(properties.get('widths', []) * self.sampling)
+                    all_spike_properties['prominences'].extend(properties.get('prominences', []))
+                    all_spike_properties['sweep_indices'].extend([sweep_idx] * len(peaks))
+                    all_spike_properties['spike_counts'].append(len(peaks))
+        
+        # Convert lists to arrays for consistency
+        if return_properties and not self.concatenate_sweeps:
+            for key in all_spike_properties:
+                all_spike_properties[key] = np.array(all_spike_properties[key])
+        
+        if time_units == 'ms':
+            all_spike_times = [array * 1000 for array in all_spike_times]
+        
+        # Create raster plot if requested
+        if plot:
+            self._plot_spike_raster(all_spike_times, time_units)
+        
+        # Return results
+        if return_properties:
+            return all_spike_times, all_spike_properties
+        else:
+            return all_spike_times
+
+    def _plot_spike_raster(self, spike_times, time_units='s'):
+        """
+        Helper method to create a spike raster plot using vertical lines.
+        
+        Parameters
+        ----------
+        spike_times : np.ndarray or list
+            Spike times from detect_spikes method.
+        threshold : float
+            Detection threshold used.
+        voltage_units : str
+            Units of voltage data.
+        """
+        fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+    
+        if self.concatenate_sweeps:
+            # For concatenated data, show as histogram-like raster
+            if len(spike_times) > 0:
+                # Create vertical lines at spike times
+                ax.vlines(spike_times, 0, 1, colors='black', linewidth=1.5, alpha=0.8)
+                ax.set_ylim(0, 1.2)
+                ax.set_ylabel('Spike Events')
+                ax.set_title(f'Spike Raster Plot\n'
+                            f'{len(spike_times)} spikes detected', fontsize=12)
+            else:
+                ax.text(0.5, 0.5, 'No spikes detected', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=14)
+                ax.set_ylim(0, 1)
+            
+            ax.set_xlabel(f'Time ({time_units})')
+            
+        else:
+            # For separate sweeps, create proper raster plot with vertical lines
+            max_time = self.total_time
+            
+            # Create raster plot using vertical lines
+            for sweep_idx, sweep_spikes in enumerate(spike_times):
+                if len(sweep_spikes) > 0:
+                    # Create vertical lines for each spike in this sweep
+                    ax.vlines(sweep_spikes, sweep_idx - 0.4, sweep_idx + 0.4, 
+                            colors='black', linewidth=1.5, alpha=0.8)
+            
+            ax.set_ylabel('Sweep #')
+            ax.set_xlabel(f'Time ({time_units})')
+            total_spikes = sum(len(spikes) for spikes in spike_times)
+            ax.set_title(f'Spike Raster Plot\n'
+                        f'Total spikes: {total_spikes}', fontsize=12)
+            ax.set_ylim(-0.5, self.num_sweeps - 0.5)
+            
+            # Add sweep count info
+            spike_counts = [len(spikes) for spikes in spike_times]
+            mean_spikes = np.mean(spike_counts)
+
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+        
+        # Print summary statistics
+        if self.concatenate_sweeps:
+            total_spikes = len(spike_times)
+            print(f"\nSpike Detection Summary:")
+            print(f"Total spikes detected: {total_spikes}")
+            print(f"Recording duration: {self.total_time:.2f} s")
+            if total_spikes > 0:
+                print(f"Spike rate: {total_spikes/self.total_time:.2f} Hz")
+                print(f"Mean ISI: {np.mean(np.diff(spike_times)):.3f} s")
+        else:
+            spike_counts = [len(spikes) for spikes in spike_times]
+            total_spikes = sum(spike_counts)
+            print(f"\nSpike Detection Summary:")
+            print(f"Total spikes detected: {total_spikes}")
+            print(f"Number of sweeps: {self.num_sweeps}")
+            print(f"Spikes per sweep: {np.mean(spike_counts):.2f} ± {np.std(spike_counts):.2f}")
+            print(f"Sweep duration: {self.total_time:.2f} s")
+            if total_spikes > 0:
+                print(f"Overall spike rate: {total_spikes/(self.num_sweeps * self.total_time):.2f} Hz")
+
     def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
                             time_units: str = 's', sweep: int = None):
         """
@@ -1488,198 +1718,6 @@ class Trace():
                     
         except Exception as e:
             raise ValueError(f"Failed to subtract baseline: {str(e)}")
-
-    def plot(self, plot_current=True, plot_voltage=False, plot_ttl=False, height_ratios=None, 
-            marker_1=None, marker_2=None, time_units='s', sweep=None, plot_mean=False):
-        ''' Plots the trace with optional markers
-        
-        Parameters
-        ----------
-        plot_current: bool, default=True
-            Whether to plot current data (if available).
-        plot_voltage: bool, default=False
-            Whether to plot voltage data as well (if available).
-        plot_ttl: bool, default=False
-            Whether to plot TTL data as well (if available).
-        height_ratios: tuple, default=None
-            Height ratios for subplots. If None, defaults based on number of plots:
-            - Single plot: N/A
-            - Two plots: (3, 1) or (1, 1) if both are non-current
-            - Three plots: (3, 1, 1) if current included, (1, 1, 1) if current not included
-        marker_1: float, default=None
-            Time position for first marker. If provided, adds a vertical line at this position.
-        marker_2: float, default=None
-            Time position for second marker. If provided, adds a vertical line at this position.
-        time_units: str, default='s'
-            Units for marker positions. Options: 's' (seconds), 'ms' (milliseconds).
-        sweep: int, 'all', or None, default=None
-            Which sweep to plot if data is not concatenated. If None, plots first sweep.
-            If 'all', plots all sweeps superimposed with mean in red.
-        plot_mean: bool, default=False
-            Whether to plot the mean trace in red when sweep='all'.
-        
-        Returns
-        -------
-        matplotlib.axes or tuple of matplotlib.axes
-            Single axis if only one channel plotted, tuple of axes if multiple plots.
-            Order depends on which channels are plotted.
-            
-        Raises
-        ------
-        ValueError
-            If no channels are selected for plotting or if required data is not available.
-        '''
-        # Check that at least one channel is selected for plotting
-        if not any([plot_current, plot_voltage, plot_ttl]):
-            raise ValueError("At least one channel must be selected for plotting")
-        
-        # Check data availability and what we can actually plot
-        has_current = self.current_data is not None and plot_current
-        has_voltage = self.voltage_data is not None and plot_voltage
-        has_ttl = self.ttl_data is not None and plot_ttl
-        
-        # Validate that we have data for the requested channels
-        channels_to_plot = []
-        channel_data = []
-        channel_labels = []
-        channel_units = []
-        
-        if plot_current:
-            if self.current_data is None:
-                raise ValueError("Current data not available for plotting")
-            channels_to_plot.append('current')
-            channel_labels.append('Current')
-            channel_units.append(self.current_unit)
-        
-        if plot_voltage:
-            if self.voltage_data is None:
-                raise ValueError("Voltage data not available for plotting")
-            channels_to_plot.append('voltage')
-            channel_labels.append('Voltage')
-            channel_units.append(self.voltage_unit)
-        
-        if plot_ttl:
-            if self.ttl_data is None:
-                raise ValueError("TTL data not available for plotting")
-            channels_to_plot.append('ttl')
-            channel_labels.append('TTL')
-            channel_units.append(self.ttl_unit)
-        
-        # Convert marker positions to seconds if needed
-        markers = []
-        for marker in [marker_1, marker_2]:
-            if marker is not None:
-                markers.append(marker)
-            else:
-                markers.append(None)
-        
-        marker_1_s, marker_2_s = markers
-        
-        # Determine what data to plot based on sweep parameter
-        def get_data_for_channel(channel_name):
-            if channel_name == 'current':
-                data = self.current_data
-            elif channel_name == 'voltage':
-                data = self.voltage_data
-            elif channel_name == 'ttl':
-                data = self.ttl_data
-            
-            if self.concatenate_sweeps:
-                return data
-            else:
-                # Handle separate sweeps
-                if sweep is None:
-                    return data[0]  # First sweep
-                elif sweep == 'all':
-                    return data  # All sweeps
-                elif isinstance(sweep, int):
-                    if sweep >= self.num_sweeps:
-                        raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
-                    return data[sweep]
-                else:
-                    raise ValueError("sweep must be None, 'all', or a valid sweep index")
-        
-        # Get time axis
-        time_axis = self.time
-        if time_units in ['ms', 'milliseconds']:
-            time_axis = time_axis * 1000
-        
-        # Determine number of subplots and height ratios
-        num_plots = len(channels_to_plot)
-        
-        if height_ratios is None:
-            if num_plots == 1:
-                height_ratios = None
-            elif num_plots == 2:
-                # Give current channel more space if it's included
-                if has_current:
-                    height_ratios = (3, 1)
-                else:
-                    height_ratios = (1, 1)
-            else:  # num_plots == 3
-                # Give current channel more space if it's included
-                if has_current:
-                    height_ratios = (3, 1, 1)
-                else:
-                    height_ratios = (1, 1, 1)
-        
-        # Create subplots
-        if num_plots == 1:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            axes = [ax]
-        else:
-            fig, axes = plt.subplots(num_plots, 1, figsize=(10, 2 + 2*num_plots), 
-                                    sharex=True, height_ratios=height_ratios)
-            if not isinstance(axes, (list, np.ndarray)):
-                axes = [axes]
-        
-        # Plot each requested channel
-        for i, (channel_name, label, unit) in enumerate(zip(channels_to_plot, channel_labels, channel_units)):
-            ax = axes[i]
-            data_to_plot = get_data_for_channel(channel_name)
-            
-            # Plot the data
-            if not self.concatenate_sweeps and sweep == 'all':
-                # Plot all sweeps
-                if plot_mean:
-                    # Plot individual sweeps with transparency
-                    for sweep_idx in range(self.num_sweeps):
-                        ax.plot(time_axis, data_to_plot[sweep_idx], color='gray', alpha=0.3, linewidth=0.5)
-                    # Plot mean in red
-                    mean_data = np.mean(data_to_plot, axis=0)
-                    ax.plot(time_axis, mean_data, color='red', linewidth=1, label='Mean')
-                else:
-                    # Plot all sweeps in black
-                    for sweep_idx in range(self.num_sweeps):
-                        ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
-            else:
-                # Plot single trace
-                ax.plot(time_axis, data_to_plot, color='black', linewidth=0.5)
-            
-            # Set labels and formatting
-            ax.set_ylabel(f'{label} ({unit})')
-            ax.grid(True, alpha=0.3)
-        
-        # Set x-axis label on bottom subplot
-        if time_units in ['ms', 'milliseconds']:
-            axes[-1].set_xlabel('Time (ms)')
-        else:
-            axes[-1].set_xlabel('Time (s)')
-        
-        # Add markers to all subplots
-        for marker, label in [(marker_1_s, 'marker 1'), (marker_2_s, 'marker 2')]:
-            if marker is not None:
-                for ax in axes:
-                    ylims = ax.get_ylim()
-                    ax.vlines(marker, ylims[0]*0.8,ylims[1]*0.8, color='red', linestyle='-', linewidth=0.8)
-                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1]*0.9), fontsize=10, color='red', ha='center', va='bottom')
-        plt.tight_layout()
-        
-        # Return appropriate axes
-        if num_plots == 1:
-            return axes[0]
-        else:
-            return tuple(axes)
 
     def remove_sweeps_with_spikes(self, threshold: float, polarity: str = 'positive',
                                 channel: str = 'current', min_distance: int = None,
@@ -2196,18 +2234,6 @@ class Trace():
                     filename=self.filename, voltage_data=resampled_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
-    def copy(self):
-        """
-        Create a deep copy of the Trace object.
-        
-        Returns
-        -------
-        Trace
-            A new Trace object with copied data arrays and attributes.
-            All data is deep copied to prevent unintended modifications.
-        """
-        import copy as copy_module
-        return copy_module.deepcopy(self)
 
 
 def combine_traces_across_files(data_files, average_across_sweeps=True):

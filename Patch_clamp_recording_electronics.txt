@@ -1,0 +1,57 @@
+This is a configuration file for the Falstad online electronic circuit simulator.
+
+Here we are simulating a simplified circuit for patch-clamp recording setup, to visualize the effects of series resistance, and pipette capacitance. 
+
+To run the simulation, go to https://www.falstad.com/circuit/circuitjs.html
+Click "File>Import From Text" and paste all of the following:
+
+
+$ 1 0.000005 42.05934401203833 99 5 43 5e-11
+r -352 544 -352 656 0 100000000
+w -352 656 -400 656 0
+w -400 656 -448 656 0
+g -400 672 -400 688 0 0
+w -448 544 -400 544 0
+w -352 544 -400 544 0
+R -128 96 -128 64 0 0 40 0.03 0 0 0.5
+i 16 128 16 192 0 1e-10
+s 16 192 -112 192 0 1 false
+g 16 128 16 112 0 0
+370 -128 288 -288 432 3 0 0
+207 -400 544 -400 512 4 Real\sVm
+S -144 192 -144 144 0 0 false 0 2
+w -400 672 -400 656 0
+r -352 544 -288 432 0 30000000
+c -208 528 -224 496 4 1e-12 -1.1763468e-316 0.001 0.1
+g -192 560 -176 592 0 0
+s -192 560 -208 528 0 0 false
+w -336 -96 -464 480 0
+w -304 560 240 256 0
+b -568 479 -308 600 0
+p -288 432 -240 256 3 0 0 0
+g -224 144 -224 32 0 0
+x -548 623 -475 626 4 14 Outside\scell
+x -546 587 -484 590 4 14 Inside\scell
+x -361 246 -287 249 4 24 Pipette
+x -177 501 -52 504 4 14 Pipette\sCapacitance
+x -452 471 -334 474 4 14 Access\sResistance
+x -545 533 -467 536 4 24 Neuron
+x -381 319 -270 322 4 14 Recorded\sVoltage
+x -235 417 -124 420 4 14 Recorded\sCurrent
+x -32 84 59 87 4 14 Current\sClamp
+x -169 42 -78 45 4 14 Voltage\sClamp
+c -448 544 -448 656 4 2e-10 1.021175313293902e-10 0.001 0
+S -128 288 -128 192 0 0 false 0 2
+w -240 256 -224 144 0
+x -114 256 58 259 4 14 Switch\sbetween\sVC\sand\sCC
+x -109 177 -11 180 4 14 ON/OFF\sSwitch
+w -160 144 -224 144 0
+r -224 496 -288 432 0 50000000
+w -128 96 -128 144 0
+o 10 64 0 12293 0.0001 0.0001 0 2 10 3 Recorded\sCurrent
+o 11 64 0 12294 0.022864846995068383 0.0001 0 2 11 3 Cell\sVm
+o 21 64 0 12294 0.03 0.0001 0 1 Recorded\sVoltage\s(inside\spipette)
+38 14 F1 0 1 80000000 -1 Access/Series\sResistance
+38 15 F1 0 1e-12 5e-11 -1 Pipette\sCapacitance
+38 6 F1 0 -0.03 0.03 -1 Command\sVoltage
+38 7 F1 0 0 1e-9 -1 Command\sCurrent
