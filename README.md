@@ -79,6 +79,9 @@ git clone https://github.com/argalloni/CSHL_IonChannels2025.git
     conda create --name CSHL_IonChannels python=3.11
     ```
     ```
+    conda activate CSHL_IonChannels
+    ```
+    ```
     pip install -r requirements.txt
     ```
 

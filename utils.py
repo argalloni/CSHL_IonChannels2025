@@ -2665,6 +2665,9 @@ class MultiLevelEventDetector:
         open_levels = [self.levels[key] for key in self.levels.keys() if key != 'Baseline']
         
         # State machine for event detection
+        if self.trace.shape[0] == 1:
+            self.trace = self.trace[0]
+
         for i, current_value in enumerate(self.trace):
             new_level = current_level
             
