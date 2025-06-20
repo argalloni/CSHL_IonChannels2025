@@ -301,7 +301,6 @@ class Trace():
 
         # Load data - handle multiple sweeps
         if concatenate_sweeps:
-            # Original behavior - concatenate all sweeps
             if is_current_clamp:
                 # In current clamp: sweepY=voltage, sweepC=current
                 # But we want current_data to contain current, so we need to get it from sweepC or another channel
@@ -313,8 +312,6 @@ class Trace():
                     try:
                         # Check if the primary channel actually contains current data
                         primary_data = abf_file.data[channels_to_load[0]] * scaling[0]
-                        # In current clamp, if we're loading from the primary channel, it's likely voltage
-                        # We'll assume the user knows what they're doing with explicit channel specification
                         current_data = primary_data
                     except (IndexError, KeyError):
                         pass
@@ -348,7 +345,7 @@ class Trace():
                         current_data = abf_file.data[channels_to_load[0]] * scaling[0]
                 
             else:
-                # Voltage clamp mode - original behavior
+                # Voltage clamp mode
                 current_data = abf_file.data[channels_to_load[0]] * scaling[0]
                 voltage_data = None
                 
@@ -385,7 +382,7 @@ class Trace():
                     print(f"Warning: Could not load TTL from channel {channels_to_load[2]}")
                     
         else:
-            # New behavior - keep sweeps separate
+            # Keep sweeps separate
             abf_file.setSweep(0)  # Start with first sweep to get dimensions
             sweep_length = len(abf_file.sweepY)
             num_sweeps = abf_file.sweepCount
@@ -1040,6 +1037,10 @@ class Trace():
                     # Plot all sweeps in black
                     for sweep_idx in range(data_to_plot.shape[0]):
                         ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
+            else:
+                # Plot all sweeps in black
+                ax.plot(time_axis, data_to_plot, color='black', alpha=1, linewidth=0.5)
+
 
             # Set labels and formatting
             ax.set_ylabel(f'{label} ({unit})')
@@ -2236,7 +2237,7 @@ class Trace():
 
 
 
-def combine_traces_across_files(data_files, average_across_sweeps=True):
+def combine_traces_across_files(data_files, average_across_sweeps=True, recording_mode="V clamp", filename=None):
     """
     Combine multiple traces from Axon files into a single Trace object.
     """
@@ -2249,7 +2250,7 @@ def combine_traces_across_files(data_files, average_across_sweeps=True):
     for filename in data_files:    
         trace = Trace.from_axon_file(filename=filename, 
                                     load_voltage=True,
-                                    recording_mode="I clamp",
+                                    recording_mode=recording_mode,
                                     load_ttl=True,
                                     units=['pA', 'mV', 'V'])
         if average_across_sweeps:
@@ -2267,7 +2268,9 @@ def combine_traces_across_files(data_files, average_across_sweeps=True):
     combined_current = np.vstack(combined_current_traces)
     combined_voltage = np.vstack(combined_voltage_traces)
     combined_ttl = np.vstack(combined_ttl_traces)
-    filename = 'averaged_traces' if average_across_sweeps else 'combined_traces'
+    
+    if filename is None:
+        filename = 'averaged_traces' if average_across_sweeps else 'combined_traces'
 
     traces = Trace(current_data=combined_current,
                     sampling_interval=trace.sampling,
@@ -2286,7 +2289,7 @@ def combine_traces_across_files(data_files, average_across_sweeps=True):
 ###############################
 
 def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
-                                 removal_method='gaussian_subtraction', removal_factor=1.0):
+                                 removal_method='gaussian_subtraction', removal_factor=1.0, hist_scale_factor=40):
     """
     Automatically detect levels in a single-channel current recording by fitting Gaussians the histogram of current values
     
@@ -2512,7 +2515,7 @@ def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, m
         
         # Plot 2: Zoomed histogram (top right) - half the y-axis range
         max_ylim = ax1.get_ylim()[1]
-        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / 40))
+        plot_histogram_with_gaussians(ax2, title_suffix=" (Zoomed Y-axis)", ylim=(0, max_ylim / hist_scale_factor))
         
         # Plot 3: Sample traces with detected levels (bottom, spanning both columns)
         ax3.plot(traces.T, alpha=0.8, color='black', linewidth=0.5)
@@ -3388,14 +3391,14 @@ def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, mea
     return voltage_steps, current_steps
 
 
-def time_to_index(t, sampling_freq, time_unit='ms'):
+def time_to_index(t, sampling_rate, time_units='ms'):
     """
     Convert time in milliseconds to index in the sweep, based on the sampling frequency.
     """
-    if time_unit in ['ms', 'milliseconds']:
-        return int(t * sampling_freq / 1000)
-    elif time_unit in ['s', 'seconds']:
-        return int(t * sampling_freq)
+    if time_units in ['ms', 'milliseconds']:
+        return int(t * sampling_rate / 1000)
+    elif time_units in ['s', 'seconds']:
+        return int(t * sampling_rate)
 
 
 
