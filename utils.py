@@ -16,6 +16,333 @@ import h5py
 # Data import functions
 ###############################
 
+import h5py
+import numpy as np
+import os
+from typing import Optional, Union, Dict, Any, Tuple, List
+import warnings
+
+
+def load_data_file(filename: str, 
+                   format_string: str = 'double',
+                   t_min: float = 0.0,
+                   t_max: float = np.inf,
+                   min_sweep_index: int = -np.inf,
+                   max_sweep_index: int = np.inf) -> Dict[str, Any]:
+    """
+    Load WaveSurfer data into Python.
+    
+    Parameters:
+    -----------
+    filename : str
+        Path to the WaveSurfer .h5 file
+    format_string : str, optional
+        Format for returned data: 'double' (default), 'single', or 'raw'
+        - 'double': scaled double-precision floats
+        - 'single': scaled single-precision floats  
+        - 'raw': unscaled ADC counts as int16 values
+    t_min : float, optional
+        Minimum time in seconds (default: 0.0)
+    t_max : float, optional
+        Maximum time in seconds (default: inf)
+    min_sweep_index : int, optional
+        Minimum sweep index to load (default: -inf)
+    max_sweep_index : int, optional
+        Maximum sweep index to load (default: +inf)
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing the loaded data structure
+    """
+    
+    # Validate arguments
+    if not np.isfinite(t_max) and t_min != 0:
+        raise ValueError('If t_max is infinite, t_min must be equal to 0')
+    
+    do_subset_in_time = (np.isscalar(t_min) and np.isscalar(t_max) and 
+                        np.isfinite(t_min) and np.isfinite(t_max))
+    
+    # Check file existence
+    if not os.path.exists(filename):
+        raise FileNotFoundError(f'The file {filename} does not exist.')
+    
+    # Check file extension
+    _, ext = os.path.splitext(filename)
+    if ext.lower() != '.h5':
+        raise ValueError('File must be a WaveSurfer-generated HDF5 (.h5) file.')
+    
+    # Read sampling rate if time subsetting is needed
+    if do_subset_in_time:
+        try:
+            with h5py.File(filename, 'r') as f:
+                try:
+                    sample_rate = f['/header/AcquisitionSampleRate'][()]
+                except KeyError:
+                    sample_rate = f['/header/Acquisition/SampleRate'][()]
+        except Exception as e:
+            raise RuntimeError(f'Error reading sample rate: {e}')
+            
+        first_scan_index = int(np.round(t_min * sample_rate))  # 0-based index in Python
+        scan_count = int(np.round((t_max - t_min) * sample_rate))
+    else:
+        first_scan_index = None
+        scan_count = None
+    
+    # Load the HDF5 structure
+    with h5py.File(filename, 'r') as f:
+        data_file_as_struct = crawl_h5_tree('/', f, do_subset_in_time, 
+                                           first_scan_index, scan_count,
+                                           min_sweep_index, max_sweep_index)
+    
+    # Correct sample rates for old WS versions
+    if 'header' in data_file_as_struct and 'VersionString' in data_file_as_struct['header']:
+        version_string = data_file_as_struct['header']['VersionString']
+        if isinstance(version_string, bytes):
+            version_string = version_string.decode('utf-8')
+        try:
+            version = float(version_string)
+        except ValueError:
+            version = 0.0
+    else:
+        version = 0.0
+    
+    if version < 0.9125:
+        # Fix acquisition sample rate
+        if 'Acquisition' in data_file_as_struct['header']:
+            nominal_acq_sr = data_file_as_struct['header']['Acquisition']['SampleRate']
+            nominal_n_ticks = 100e6 / nominal_acq_sr
+            if nominal_n_ticks != np.round(nominal_n_ticks):
+                actual_acq_sr = 100e6 / np.floor(nominal_n_ticks)
+                data_file_as_struct['header']['Acquisition']['SampleRate'] = actual_acq_sr
+        
+        # Fix stimulation sample rate
+        if 'Stimulation' in data_file_as_struct['header']:
+            nominal_stim_sr = data_file_as_struct['header']['Stimulation']['SampleRate']
+            nominal_n_ticks = 100e6 / nominal_stim_sr
+            if nominal_n_ticks != np.round(nominal_n_ticks):
+                actual_stim_sr = 100e6 / np.round(nominal_n_ticks)
+                data_file_as_struct['header']['Stimulation']['SampleRate'] = actual_stim_sr
+    
+    # Handle analog signal scaling
+    if format_string.lower() == 'raw':
+        return data_file_as_struct
+    
+    # Get number of AI channels
+    try:
+        if 'NAIChannels' in data_file_as_struct['header']:
+            n_ai_channels = data_file_as_struct['header']['NAIChannels']
+        else:
+            n_ai_channels = data_file_as_struct['header']['Acquisition']['NAnalogChannels']
+    except KeyError:
+        raise RuntimeError('Unable to read number of AI channels from file.')
+    
+    if n_ai_channels == 0:
+        return data_file_as_struct
+    
+    # Get scaling information
+    try:
+        if 'AIChannelScales' in data_file_as_struct['header']:
+            all_analog_channel_scales = data_file_as_struct['header']['AIChannelScales']
+        else:
+            all_analog_channel_scales = data_file_as_struct['header']['Acquisition']['AnalogChannelScales']
+    except KeyError:
+        raise RuntimeError('Unable to read channel scale information from file.')
+    
+    try:
+        if 'IsAIChannelActive' in data_file_as_struct['header']:
+            is_active = np.array(data_file_as_struct['header']['IsAIChannelActive'], dtype=bool)
+        else:
+            is_active = np.array(data_file_as_struct['header']['Acquisition']['IsAnalogChannelActive'], dtype=bool)
+    except KeyError:
+        raise RuntimeError('Unable to read active/inactive channel information from file.')
+    
+    analog_channel_scales = all_analog_channel_scales[is_active]
+    
+    # Get scaling coefficients
+    try:
+        if 'AIScalingCoefficients' in data_file_as_struct['header']:
+            analog_scaling_coefficients = data_file_as_struct['header']['AIScalingCoefficients']
+        else:
+            analog_scaling_coefficients = data_file_as_struct['header']['Acquisition']['AnalogScalingCoefficients']
+    except KeyError:
+        raise RuntimeError('Unable to read channel scaling coefficients from file.')
+    
+    # Scale AI signals
+    does_user_want_single = format_string.lower() == 'single'
+    
+    for field_name in list(data_file_as_struct.keys()):
+        if (len(field_name) >= 5 and 
+            (field_name.startswith('sweep') or field_name.startswith('trial'))):
+            
+            if 'analogScans' in data_file_as_struct[field_name]:
+                analog_data_as_counts = data_file_as_struct[field_name]['analogScans']
+                
+                if does_user_want_single:
+                    scaled_data = scaled_single_analog_data_from_raw(
+                        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
+                else:
+                    scaled_data = scaled_double_analog_data_from_raw(
+                        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
+                
+                data_file_as_struct[field_name]['analogScans'] = scaled_data
+    
+    return data_file_as_struct
+
+
+def crawl_h5_tree(path_to_group: str, 
+                  h5_file: h5py.File,
+                  do_subset_in_time: bool,
+                  first_scan_index: Optional[int],
+                  scan_count: Optional[int],
+                  min_sweep_index: float,
+                  max_sweep_index: float) -> Dict[str, Any]:
+    """Recursively crawl HDF5 tree and build dictionary structure."""
+    
+    dataset_names, subgroup_names = get_group_info(path_to_group, h5_file)
+    
+    s = {}
+    
+    # Process subgroups
+    for subgroup_name in subgroup_names:
+        if subgroup_name.startswith('sweep_'):
+            # Special handling for sweep groups
+            sweep_index_str = subgroup_name[6:]  # Remove 'sweep_' prefix
+            try:
+                sweep_index = int(sweep_index_str)
+                if min_sweep_index <= sweep_index <= max_sweep_index:
+                    field_name = field_name_from_hdf_name(subgroup_name)
+                    path_to_subgroup = f"{path_to_group}{subgroup_name}/"
+                    s[field_name] = crawl_h5_tree(path_to_subgroup, h5_file, 
+                                                 do_subset_in_time, first_scan_index, 
+                                                 scan_count, min_sweep_index, max_sweep_index)
+            except ValueError:
+                # If sweep index is not a valid integer, skip
+                continue
+        else:
+            # Regular subgroups
+            field_name = field_name_from_hdf_name(subgroup_name)
+            path_to_subgroup = f"{path_to_group}{subgroup_name}/"
+            s[field_name] = crawl_h5_tree(path_to_subgroup, h5_file,
+                                         do_subset_in_time, first_scan_index,
+                                         scan_count, min_sweep_index, max_sweep_index)
+    
+    # Process datasets
+    for dataset_name in dataset_names:
+        path_to_dataset = f"{path_to_group}{dataset_name}"
+        
+        if dataset_name in ['analogScans', 'digitalScans']:
+            if do_subset_in_time and first_scan_index is not None and scan_count is not None:
+                dataset = h5_file[path_to_dataset]
+                if len(dataset.shape) < 2:
+                    channel_count = 1
+                    data = dataset[first_scan_index:first_scan_index + scan_count]
+                else:
+                    channel_count = dataset.shape[1]
+                    data = dataset[first_scan_index:first_scan_index + scan_count, :]
+            else:
+                data = h5_file[path_to_dataset][()]
+        else:
+            data = h5_file[path_to_dataset][()]
+        
+        # Handle string data
+        if isinstance(data, bytes):
+            data = data.decode('utf-8')
+        elif isinstance(data, np.ndarray) and data.dtype.kind in ['S', 'U']:
+            if data.size == 1:
+                data = str(data.item())
+            else:
+                data = [str(item) for item in data.flat]
+        
+        field_name = field_name_from_hdf_name(dataset_name)
+        s[field_name] = data
+    
+    return s
+
+
+def get_group_info(path_to_group: str, h5_file: h5py.File) -> Tuple[List[str], List[str]]:
+    """Get dataset and subgroup names in the current group."""
+    
+    group = h5_file[path_to_group]
+    
+    dataset_names = []
+    subgroup_names = []
+    
+    for key in group.keys():
+        if isinstance(group[key], h5py.Dataset):
+            dataset_names.append(key)
+        elif isinstance(group[key], h5py.Group):
+            subgroup_names.append(key)
+    
+    return dataset_names, subgroup_names
+
+
+def field_name_from_hdf_name(hdf_name: str) -> str:
+    """Convert HDF5 name to valid Python dictionary key."""
+    
+    try:
+        num_val = float(hdf_name)
+        if num_val == int(num_val):  # It's an integer
+            return f'n{hdf_name}'
+    except ValueError:
+        pass
+    
+    return hdf_name
+
+
+def scaled_double_analog_data_from_raw(analog_data_as_counts: np.ndarray,
+                                     analog_channel_scales: np.ndarray,
+                                     analog_scaling_coefficients: np.ndarray) -> np.ndarray:
+    """Convert raw ADC counts to scaled double-precision values."""
+    
+    # Convert to float64
+    scaled_data = analog_data_as_counts.astype(np.float64)
+    
+    # Apply cubic polynomial scaling (simplified version)
+    # This is a placeholder - the actual scaling might be more complex
+    for i in range(scaled_data.shape[1] if len(scaled_data.shape) > 1 else 1):
+        if len(scaled_data.shape) > 1:
+            channel_data = scaled_data[:, i]
+        else:
+            channel_data = scaled_data
+            
+        # Apply scaling coefficients (assuming they're cubic polynomial coefficients)
+        if len(analog_scaling_coefficients.shape) > 1:
+            coeffs = analog_scaling_coefficients[i, :]
+        else:
+            coeffs = analog_scaling_coefficients
+            
+        # Apply polynomial transformation
+        scaled_channel = np.polyval(coeffs[::-1], channel_data)  # Reverse for numpy convention
+        
+        # Apply channel scale
+        if i < len(analog_channel_scales):
+            scaled_channel *= analog_channel_scales[i]
+        
+        if len(scaled_data.shape) > 1:
+            scaled_data[:, i] = scaled_channel
+        else:
+            scaled_data = scaled_channel
+    
+    return scaled_data
+
+
+def scaled_single_analog_data_from_raw(analog_data_as_counts: np.ndarray,
+                                     analog_channel_scales: np.ndarray,
+                                     analog_scaling_coefficients: np.ndarray) -> np.ndarray:
+    """Convert raw ADC counts to scaled single-precision values."""
+    
+    # Use the double precision function then convert to float32
+    scaled_data = scaled_double_analog_data_from_raw(
+        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
+    
+    return scaled_data.astype(np.float32)
+
+
+
+
+
+
 def get_sweeps(f):
     rec = pyabf.ABF(f)
     swps = []
@@ -1335,7 +1662,7 @@ class Trace():
         
         return cropped_trace
 
-    def analyze_action_potentials(self, min_spike_amplitude=5.0, max_width=10.0, min_ISI=1.0, 
+    def analyze_action_potentials2(self, min_spike_amplitude=5.0, max_width=10.0, min_ISI=1.0, 
                                 headstage=0, sweep=None, return_dict=False, time_units='ms'):
         """
         Analyze action potentials/spikes in voltage data using 3rd derivative peak detection.
@@ -1539,6 +1866,225 @@ class Trace():
                             'peak_voltages': results[2],
                             'spike_amplitudes': results[3],
                             'spike_widths': results[4]
+                        })
+                    else:
+                        all_results.append(results)
+                
+                return all_results
+
+
+    def analyze_action_potentials(self, min_spike_amplitude=5.0, max_width=10.0, min_ISI=1.0, 
+                                headstage=0, sweep=None, return_dict=False, time_units='ms'):
+        """
+        Analyze action potentials/spikes in voltage data using 3rd derivative peak detection.
+        
+        Parameters
+        ----------
+        min_spike_amplitude : float, default=5.0
+            Minimum spike amplitude in voltage units to exclude small fluctuations.
+        max_width : float, default=10.0
+            Maximum spike width at half-max in milliseconds to exclude unreasonably wide events.
+        min_ISI : float, default=1.0
+            Minimum inter-spike interval in milliseconds to prevent double-counting of same spike.
+        headstage : int, default=0
+            Which headstage to analyze (for multi-headstage recordings).
+        sweep : int or None, default=None
+            Which sweep to analyze. If None and data has separate sweeps, analyzes all sweeps.
+        return_dict : bool, default=False
+            If True, returns results as dictionary with labeled fields.
+            
+        Returns
+        -------
+        tuple or dict or list
+            If return_dict=False:
+                - For single sweep: tuple of arrays (spike_times, threshold_voltages, peak_voltages, 
+                spike_amplitudes, spike_widths, peak_times)
+                - For multiple sweeps: list of tuples
+            If return_dict=True:
+                - Dictionary or list of dictionaries with keys: 'spike_times', 'threshold_voltages',
+                'peak_voltages', 'spike_amplitudes', 'spike_widths', 'peak_times'
+        
+        Raises
+        ------
+        ValueError
+            If no voltage data is available.
+        """
+        if self.voltage_data is None:
+            raise ValueError("No voltage data available for spike analysis")
+        
+        # Get the voltage data for the specified headstage
+        if self.num_headstages > 1:
+            if self.concatenate_sweeps:
+                # Shape: (num_headstages, total_datapoints)
+                voltage = self.voltage_data[headstage]
+            else:
+                # Shape: (num_headstages, num_sweeps, sweep_length)
+                voltage = self.voltage_data[headstage]
+        else:
+            voltage = self.voltage_data
+        
+        # Convert parameters to samples
+        if time_units == 's':
+            min_ISI_samples = int(min_ISI / self.sampling)  # Convert ms to samples
+            max_width_samples = int(max_width / self.sampling)  # Convert ms to samples
+        elif time_units == 'ms':
+            min_ISI_samples = int(min_ISI * 0.001 / self.sampling)  # Convert ms to samples
+            max_width_samples = int(max_width * 0.001 / self.sampling)  # Convert ms to samples
+        
+        def analyze_single_trace(v_data):
+            """Analyze spikes in a single voltage trace."""
+            # Calculate derivatives
+            dv_dt = np.gradient(v_data)
+            d2v_dt2 = np.gradient(dv_dt)
+            d3v_dt3 = np.gradient(d2v_dt2)
+            
+            # Find peaks in 3rd derivative (spike times)
+            spike_indices, _ = signal.find_peaks(d3v_dt3, distance=min_ISI_samples)
+            
+            if len(spike_indices) == 0:
+                # No spikes found
+                empty_array = np.array([])
+                return (empty_array, empty_array, empty_array, empty_array, empty_array, empty_array)
+            
+            # Initialize output arrays
+            valid_spikes = []
+            valid_peaks = []
+            threshold_voltages = []
+            peak_voltages = []
+            spike_amplitudes = []
+            spike_widths = []
+            
+            for spike_idx in spike_indices:
+                # Threshold voltage is voltage at spike time
+                v_threshold = v_data[spike_idx]
+                
+                # Find peak voltage after threshold
+                # Search window: from spike time to spike time + max_width
+                search_end = min(spike_idx + max_width_samples, len(v_data))
+                if search_end <= spike_idx:
+                    continue
+                    
+                peak_idx = spike_idx + np.argmax(v_data[spike_idx:search_end])
+                v_peak = v_data[peak_idx]
+                
+                # Calculate spike amplitude
+                amplitude = v_peak - v_threshold
+                
+                # Skip if amplitude is too small
+                if amplitude < min_spike_amplitude:
+                    continue
+                
+                # Find spike width at half-max
+                half_max_voltage = v_threshold + (amplitude / 2)
+                
+                # Find where voltage drops back below half-max after the peak
+                after_peak = v_data[peak_idx:search_end]
+                below_half = np.where(after_peak < half_max_voltage)[0]
+                
+                if len(below_half) > 0:
+                    # Width is from threshold to first point below half-max after peak
+                    width_samples = peak_idx - spike_idx + below_half[0]
+                    if time_units == 'ms':
+                        width_ms = width_samples * self.sampling * 1000
+                    elif time_units == 's':
+                        width_ms = width_samples * self.sampling
+
+                    
+                    # Skip if width is too large
+                    if width_ms > max_width:
+                        continue
+                else:
+                    # Couldn't find return to half-max, skip this spike
+                    continue
+                
+                # This is a valid spike
+                valid_spikes.append(spike_idx)
+                valid_peaks.append(peak_idx)
+                threshold_voltages.append(v_threshold)
+                peak_voltages.append(v_peak)
+                spike_amplitudes.append(amplitude)
+                spike_widths.append(width_ms)
+            
+            # Convert to arrays
+            if len(valid_spikes) > 0:
+                if time_units == 'ms':
+                    spike_times = np.array(valid_spikes) * self.sampling * 1000  # Convert to ms
+                    peak_times = np.array(valid_peaks) * self.sampling * 1000  # Convert to ms
+                elif time_units == 's':
+                    spike_times = np.array(valid_spikes) * self.sampling
+                    peak_times = np.array(valid_peaks) * self.sampling
+                threshold_voltages = np.array(threshold_voltages)
+                peak_voltages = np.array(peak_voltages)
+                spike_amplitudes = np.array(spike_amplitudes)
+                spike_widths = np.array(spike_widths)
+            else:
+                # No valid spikes found
+                spike_times = np.array([])
+                peak_times = np.array([])
+                threshold_voltages = np.array([])
+                peak_voltages = np.array([])
+                spike_amplitudes = np.array([])
+                spike_widths = np.array([])
+            
+            return (spike_times, threshold_voltages, peak_voltages, spike_amplitudes, spike_widths, peak_times)
+        
+        # Process data based on structure
+        if voltage.ndim == 1 or (voltage.ndim == 2 and self.concatenate_sweeps):
+            # Single trace (1D or concatenated)
+            if voltage.ndim == 2:
+                # This shouldn't happen based on data structure, but handle it
+                voltage = voltage.flatten()
+            
+            results = analyze_single_trace(voltage)
+            
+            if return_dict:
+                return {
+                    'spike_times': results[0],
+                    'threshold_voltages': results[1],
+                    'peak_voltages': results[2],
+                    'spike_amplitudes': results[3],
+                    'spike_widths': results[4],
+                    'peak_times': results[5]
+                }
+            else:
+                return results
+        
+        else:
+            # Multiple sweeps (2D data)
+            if sweep is not None:
+                # Analyze specific sweep
+                if sweep >= voltage.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({voltage.shape[0]})")
+                
+                results = analyze_single_trace(voltage[sweep])
+                
+                if return_dict:
+                    return {
+                        'spike_times': results[0],
+                        'threshold_voltages': results[1],
+                        'peak_voltages': results[2],
+                        'spike_amplitudes': results[3],
+                        'spike_widths': results[4],
+                        'peak_times': results[5]
+                    }
+                else:
+                    return results
+            
+            else:
+                # Analyze all sweeps
+                all_results = []
+                
+                for sweep_idx in range(voltage.shape[0]):
+                    results = analyze_single_trace(voltage[sweep_idx])
+                    
+                    if return_dict:
+                        all_results.append({
+                            'spike_times': results[0],
+                            'threshold_voltages': results[1],
+                            'peak_voltages': results[2],
+                            'spike_amplitudes': results[3],
+                            'spike_widths': results[4],
+                            'peak_times': results[5]
                         })
                     else:
                         all_results.append(results)
@@ -2346,6 +2892,9 @@ class Trace():
         sample_rate = float(header['AcquisitionSampleRate'].flatten()[0])
         sampling_interval = 1.0 / sample_rate
         
+        # voltage_scaling = data_dict['header']['AIScalingCoefficients'][0,2] + data_dict['header']['AIScalingCoefficients'][0,0] 
+        # current_scaling = data_dict['header']['AIScalingCoefficients'][0,2]
+
         # Find all sweep keys
         sweep_keys = [key for key in data_dict.keys() if key.startswith('sweep_')]
         if not sweep_keys:
@@ -5585,6 +6134,40 @@ def compute_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
     firing_rate = gaussian_filter1d(spike_train, sigma=sigma_samples) * sampling_rate
 
     return time, firing_rate
+
+def fast_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
+    """
+    Efficiently computes firing rate from spike times using Gaussian kernel.
+    """
+    import numpy as np
+
+    n_samples = int(duration * sampling_rate)
+    time = np.linspace(0, duration, n_samples, endpoint=False)
+    firing_rate = np.zeros(n_samples)
+
+    # Precompute Gaussian kernel
+    sigma_samp = sigma_ms / 1000 * sampling_rate
+    kernel_width = int(5 * sigma_samp)  # truncate at ±5σ
+    kernel_x = np.arange(-kernel_width, kernel_width + 1)
+    kernel = np.exp(-0.5 * (kernel_x / sigma_samp)**2)
+    kernel /= (kernel.sum() / sampling_rate)  # normalize to preserve Hz
+
+    # Place kernel around each spike
+    spike_indices = (spike_times * sampling_rate).astype(int)
+    for idx in spike_indices:
+        lo = idx - kernel_width
+        hi = idx + kernel_width + 1
+        if hi < 0 or lo >= n_samples:
+            continue
+        k_lo = max(0, -lo)
+        s_lo = max(0, lo)
+        s_hi = min(n_samples, hi)
+        k_hi = k_lo + (s_hi - s_lo)
+        firing_rate[s_lo:s_hi] += kernel[k_lo:k_hi]
+
+    return time, firing_rate
+
+
 
 def plot_spike_histograms(spike_data, bins='auto', figsize=(12, 4), 
                          colors=None, alpha=0.7, density=False,
