@@ -27,6 +27,48 @@ def get_sweeps(f):
     return swps, swp_time, rec.dataRate
 
 
+def hdf5_to_dict(file_path):
+    """
+    Load an HDF5 file and convert it to a nested Python dictionary.
+
+    :param file_path (str): Path to the HDF5 file.
+    :return dict: nested Python dictionary with identical structure as the HDF5 file.
+    """
+    # Initial call to convert the top-level group in the HDF5 file
+    # (necessary because the top-level group is not a h5py.Group object)
+    with h5py.File(file_path, 'r') as f:
+        data_dict = {}
+        # Loop over the top-level keys in the HDF5 file
+        for key in f.keys():
+            if isinstance(f[key], h5py.Group):
+                # Recursively convert the group to a nested dictionary
+                data_dict[key] = convert_hdf5_group_to_dict(f[key])
+            else:
+                # If the key corresponds to a dataset, add it to the dictionary
+                data_dict[key] = f[key][()]
+    return data_dict
+
+
+def convert_hdf5_group_to_dict(group):
+    """
+    Helper function to recursively convert an HDF5 group to a nested Python dictionary.
+
+    :param group (h5py.Group): The HDF5 group to convert.
+    :return dict: Nested Python dictionary with identical structure as the HDF5 group.
+    """
+    data_dict = {}
+    # Loop over the keys in the HDF5 group
+    for key in group.keys():
+        if isinstance(group[key], h5py.Group):
+            # Recursively convert the group to a nested dictionary
+            data_dict[key] = convert_hdf5_group_to_dict(group[key])
+        else:
+            # If the key corresponds to a dataset, add it to the dictionary
+            data_dict[key] = group[key][()]
+
+    return data_dict
+
+
 class Trace():
     '''class for a time series data trace containing current and voltage recordings.
 
@@ -73,7 +115,7 @@ class Trace():
         self.filename = filename
         self.concatenate_sweeps = concatenate_sweeps
 
-    def __repr__(self):
+    def repr_old(self):
         """Return a string representation of the Trace object."""
         lines = []
         lines.append(f"Trace('{self.filename}')")
@@ -88,6 +130,47 @@ class Trace():
                 lines.append(f"Number of sweeps: {self.current_data.shape[0]}")
                 lines.append(f"Points per sweep: {self.current_data.shape[1]:,}")
                 lines.append(f"Duration per sweep: {self.total_time:.3f} s")
+            lines.append(f"Sampling rate: {self.sampling_rate:.0f} Hz")
+            lines.append(f"Sampling interval: {self.sampling*1000:.3f} ms")
+            
+            # Show available channels
+            channels = ["Current"]
+            if self.voltage_data is not None:
+                channels.append("Voltage")
+            if self.ttl_data is not None:
+                channels.append("TTL")
+            lines.append(f"Available channels: {', '.join(channels)}")
+        else:
+            lines.append("No data loaded")
+            
+        return "\n".join(lines)
+
+    def __repr__(self):
+        """Return a string representation of the Trace object (updated for multi-headstage)."""
+        lines = []
+        lines.append(f"Trace('{self.filename}')")
+        lines.append("=" * 40)
+        
+        # Basic info
+        if self.current_data is not None:
+            if self.num_headstages > 1:
+                lines.append(f"Number of headstages: {self.num_headstages}")
+            
+            if self.concatenate_sweeps:
+                if self.num_headstages > 1:
+                    lines.append(f"Data points per headstage: {self.current_data.shape[1]:,}")
+                else:
+                    lines.append(f"Data points: {len(self.current_data):,}")
+                lines.append(f"Duration: {self.total_time:.3f} s")
+            else:
+                if self.num_headstages > 1:
+                    lines.append(f"Number of sweeps: {self.current_data.shape[1]}")
+                    lines.append(f"Points per sweep: {self.current_data.shape[2]:,}")
+                else:
+                    lines.append(f"Number of sweeps: {self.current_data.shape[0]}")
+                    lines.append(f"Points per sweep: {self.current_data.shape[1]:,}")
+                lines.append(f"Duration per sweep: {self.total_time:.3f} s")
+            
             lines.append(f"Sampling rate: {self.sampling_rate:.0f} Hz")
             lines.append(f"Sampling interval: {self.sampling*1000:.3f} ms")
             
@@ -152,7 +235,7 @@ class Trace():
         return np.round(1/self.sampling)
 
     @property
-    def time(self):
+    def time_old(self):
         ''' Returns time axis as numpy array '''
         if self.current_data is not None:
             if self.concatenate_sweeps:
@@ -163,11 +246,57 @@ class Trace():
         return None
 
     @property
+    def time(self):
+        ''' Returns time axis as numpy array '''
+        if self.current_data is not None:
+            if self.num_headstages > 1:
+                # Multi-headstage data
+                if self.concatenate_sweeps:
+                    # Shape: (num_headstages, total_datapoints)
+                    return np.arange(0, self.current_data.shape[1]) * self.sampling
+                else:
+                    # Shape: (num_headstages, num_sweeps, sweep_length)
+                    # Return time axis for a single sweep
+                    return np.arange(0, self.current_data.shape[2]) * self.sampling
+            else:
+                # Single-headstage data (original logic)
+                if self.concatenate_sweeps:
+                    return np.arange(0, len(self.current_data)) * self.sampling
+                else:
+                    # Return time axis for a single sweep
+                    return np.arange(0, self.current_data.shape[1]) * self.sampling
+        return None
+    
+    @property
     def time_ms(self):
         return self.time * 1000
 
     @property
     def total_time(self):
+        ''' Returns the total duration of the recording '''
+        if self.current_data is not None:
+            if self.num_headstages > 1:
+                # Multi-headstage data
+                if self.concatenate_sweeps:
+                    # Shape: (num_headstages, total_datapoints)
+                    return self.current_data.shape[1] * self.sampling
+                else:
+                    # Shape: (num_headstages, num_sweeps, sweep_length)
+                    # Return duration of a single sweep
+                    return self.current_data.shape[2] * self.sampling
+            else:
+                # Single-headstage data (original logic)
+                if self.concatenate_sweeps:
+                    # Shape: (total_datapoints,)
+                    return len(self.current_data) * self.sampling
+                else:
+                    # Shape: (num_sweeps, sweep_length)
+                    # Return duration of a single sweep
+                    return self.current_data.shape[1] * self.sampling
+        return None
+
+    @property
+    def total_time_old(self):
         ''' Returns the total duration of the recording '''
         if self.current_data is not None:
             if self.concatenate_sweeps:
@@ -182,11 +311,1230 @@ class Trace():
         return self.total_time * 1000
 
     @property
-    def num_sweeps(self):
+    def num_sweeps_old(self):
         ''' Returns the number of sweeps '''
         if self.current_data is not None and not self.concatenate_sweeps:
             return self.current_data.shape[0]
         return 1
+
+    @property
+    def num_sweeps(self):
+        """Returns the number of sweeps, handling both single and multi-headstage data."""
+        if self.current_data is None:
+            return 0
+        
+        if self.concatenate_sweeps:
+            # If sweeps are concatenated, there's only 1 "sweep" regardless of dimensions
+            return 1
+        
+        # For non-concatenated data, check dimensions
+        if self.current_data.ndim == 3:
+            # Multi-headstage data: (num_headstages, num_sweeps, sweep_length)
+            return self.current_data.shape[1]
+        elif self.current_data.ndim == 2:
+            # Single-headstage data: (num_sweeps, sweep_length)
+            return self.current_data.shape[0]
+        elif self.current_data.ndim == 1:
+            # Single sweep, single headstage: (sweep_length,)
+            return 1
+        else:
+            # Shouldn't happen, but handle gracefully
+            raise ValueError(f"Unexpected data dimensions: {self.current_data.ndim}")
+        
+    @property
+    def num_headstages(self):
+        """Return the number of recording headstages."""
+        if self.current_data is None:
+            return 0
+        elif self.current_data.ndim <= 2:
+            return 1  # Single headstage (backward compatibility)
+        else:
+            return self.current_data.shape[0]
+
+
+    @classmethod
+    def from_axon_file_multi_headstage(cls, filename: str, headstage_channels: list, 
+                                    scaling: float | list = 1.0, units: str | list = None, 
+                                    concatenate_sweeps: bool = False, recording_mode: str = "V clamp"):
+        """
+        Loads data from an AXON .abf file with multiple recording headstages.
+        
+        Parameters
+        ----------
+        filename : str
+            Path of a .abf file.
+        headstage_channels : list of tuples
+            Each tuple specifies (current_channel, voltage_channel) for one headstage.
+            Example: [(0, 1), (2, 3)] for 2 headstages where:
+            - Headstage 1: current on channel 0, voltage on channel 1
+            - Headstage 2: current on channel 2, voltage on channel 3
+        scaling : float or list, default=1.0
+            Scaling factor(s) applied to the data. If list, must have 2*num_headstages elements
+            in order: [current1_scale, voltage1_scale, current2_scale, voltage2_scale, ...]
+        units : str or list, default=None
+            Data unit(s). If list, must have 2*num_headstages elements in same order as scaling.
+        concatenate_sweeps : bool, default=False
+            Whether to concatenate sweeps or keep them separate.
+        recording_mode : str, default="V clamp"
+            Recording mode: "V clamp" or "I clamp".
+            
+        Returns
+        -------
+        Trace
+            An initialized Trace object with multi-dimensional current_data and voltage_data.
+            Data shape: (num_headstages, num_sweeps, datapoints) if not concatenated
+                    (num_headstages, total_datapoints) if concatenated
+        """
+        if not Path(filename).suffix.lower() == '.abf':
+            raise Exception('Incompatible file type. Method only loads .abf files.')
+
+        # Validate recording_mode
+        valid_modes = ["V clamp", "I clamp", "voltage clamp", "current clamp"]
+        if recording_mode not in valid_modes:
+            raise ValueError(f"Invalid recording_mode '{recording_mode}'. Must be one of: {valid_modes}")
+        
+        is_current_clamp = recording_mode.lower() in ["i clamp", "current clamp"]
+        
+        import pyabf
+        abf_file = pyabf.ABF(filename)
+        
+        num_headstages = len(headstage_channels)
+        
+        # Validate all channels exist
+        all_channels = []
+        for current_ch, voltage_ch in headstage_channels:
+            all_channels.extend([current_ch, voltage_ch])
+            if current_ch not in abf_file.channelList:
+                raise IndexError(f'Current channel {current_ch} does not exist. Available channels: {abf_file.channelList}')
+            if voltage_ch not in abf_file.channelList:
+                raise IndexError(f'Voltage channel {voltage_ch} does not exist. Available channels: {abf_file.channelList}')
+        
+        # Handle scaling and units
+        expected_params = 2 * num_headstages  # current + voltage for each headstage
+        
+        if isinstance(scaling, (int, float)):
+            scaling = [scaling] * expected_params
+        elif len(scaling) != expected_params:
+            raise ValueError(f"Number of scaling factors ({len(scaling)}) must match 2*num_headstages ({expected_params})")
+        
+        if units is None:
+            units = []
+            for current_ch, voltage_ch in headstage_channels:
+                units.extend([abf_file.adcUnits[current_ch], abf_file.adcUnits[voltage_ch]])
+        elif isinstance(units, str):
+            units = [units] * expected_params
+        elif len(units) != expected_params:
+            raise ValueError(f"Number of units ({len(units)}) must match 2*num_headstages ({expected_params})")
+        
+        # Load data
+        if concatenate_sweeps:
+            # Initialize arrays for concatenated data
+            current_data_list = []
+            voltage_data_list = []
+            
+            for i, (current_ch, voltage_ch) in enumerate(headstage_channels):
+                current_scale = scaling[i*2]
+                voltage_scale = scaling[i*2 + 1]
+                
+                if is_current_clamp:
+                    # In current clamp, we might need to swap or use sweepC
+                    # This is more complex - for now, assume channels are correctly assigned
+                    current_data_headstage = abf_file.data[current_ch] * current_scale
+                    voltage_data_headstage = abf_file.data[voltage_ch] * voltage_scale
+                else:
+                    # Voltage clamp mode
+                    current_data_headstage = abf_file.data[current_ch] * current_scale
+                    voltage_data_headstage = abf_file.data[voltage_ch] * voltage_scale
+                
+                current_data_list.append(current_data_headstage)
+                voltage_data_list.append(voltage_data_headstage)
+            
+            # Stack into multi-dimensional arrays
+            current_data = np.stack(current_data_list, axis=0)  # Shape: (num_headstages, total_datapoints)
+            voltage_data = np.stack(voltage_data_list, axis=0)
+            
+        else:
+            # Keep sweeps separate
+            abf_file.setSweep(0)
+            sweep_length = len(abf_file.sweepY)
+            num_sweeps = abf_file.sweepCount
+            
+            # Initialize arrays: (num_headstages, num_sweeps, sweep_length)
+            current_data = np.zeros((num_headstages, num_sweeps, sweep_length))
+            voltage_data = np.zeros((num_headstages, num_sweeps, sweep_length))
+            
+            # Load each sweep for each headstage
+            for sweep_idx in range(num_sweeps):
+                for headstage_idx, (current_ch, voltage_ch) in enumerate(headstage_channels):
+                    current_scale = scaling[headstage_idx*2]
+                    voltage_scale = scaling[headstage_idx*2 + 1]
+                    
+                    # Load current data
+                    abf_file.setSweep(sweep_idx, channel=current_ch)
+                    current_data[headstage_idx, sweep_idx] = abf_file.sweepY * current_scale
+                    
+                    # Load voltage data
+                    abf_file.setSweep(sweep_idx, channel=voltage_ch)
+                    voltage_data[headstage_idx, sweep_idx] = abf_file.sweepY * voltage_scale
+        
+        # Set units (use units from first headstage for backward compatibility)
+        current_unit = units[0]
+        voltage_unit = units[1]
+        
+        return cls(current_data=current_data, sampling_interval=1/abf_file.sampleRate, 
+                current_unit=current_unit, filename=Path(filename).name,
+                voltage_data=voltage_data, voltage_unit=voltage_unit,
+                ttl_data=None, ttl_unit='V',
+                concatenate_sweeps=concatenate_sweeps)
+
+
+    def plot_multi_headstage(self, headstage=0, plot_current=True, plot_voltage=False, 
+                            height_ratios=None, marker_1=None, marker_2=None, 
+                            time_units='s', sweep='all', plot_mean=False, overlay_headstages=False):
+        """
+        Plot data from multi-headstage recordings.
+        
+        Parameters
+        ----------
+        headstage : int, list, or 'all', default=0
+            Which headstage(s) to plot. If int, plots single headstage. 
+            If list, plots specified headstages. If 'all', plots all headstages.
+            When overlay_headstages=True and sweep is specified, this determines which headstages to overlay.
+        plot_current : bool, default=True
+            Whether to plot current data.
+        plot_voltage : bool, default=False
+            Whether to plot voltage data.
+        height_ratios : tuple, optional
+            Height ratios for subplots.
+        marker_1 : float, optional
+            Time position for first marker.
+        marker_2 : float, optional
+            Time position for second marker.
+        time_units : str, default='s'
+            Time units ('s' or 'ms').
+        sweep : int, 'all', or None, default='all'
+            Which sweep to plot.
+        plot_mean : bool, default=False
+            Whether to plot mean when sweep='all'.
+        overlay_headstages : bool, default=False
+            When True and sweep is specified (not 'all'), overlays multiple headstages 
+            on the same subplot(s). Only works with specific sweep selection.
+            
+        Returns
+        -------
+        matplotlib.axes or tuple of matplotlib.axes
+            Plot axes.
+        """
+        import matplotlib.pyplot as plt
+        
+        # Check if we have multi-dimensional data
+        if self.current_data.ndim < 2:
+            raise ValueError("This method is for multi-headstage data. Use regular plot() method instead.")
+        
+        # Handle overlay mode
+        if overlay_headstages and sweep != 'all' and isinstance(sweep, (int, float)):
+            return self._plot_overlay_headstages(headstage, plot_current, plot_voltage, 
+                                            height_ratios, marker_1, marker_2, 
+                                            time_units, sweep)
+        
+        # Original single-headstage plotting logic
+        if isinstance(headstage, (list, tuple)):
+            # If multiple headstages specified but not overlay mode, plot first one
+            headstage = headstage[0]
+            print(f"Warning: Multiple headstages specified but overlay_headstages=False. Plotting headstage {headstage} only.")
+        elif headstage == 'all':
+            headstage = 0
+            print("Warning: headstage='all' specified but overlay_headstages=False. Plotting headstage 0 only.")
+        
+        # For multi-headstage data, temporarily extract single headstage data
+        if self.concatenate_sweeps:
+            # Shape: (num_headstages, total_datapoints)
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        else:
+            # Shape: (num_headstages, num_sweeps, sweep_length)
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        
+        try:
+            # Use the regular plot method
+            result = self.plot(plot_current=plot_current, plot_voltage=plot_voltage, 
+                            height_ratios=height_ratios, marker_1=marker_1, marker_2=marker_2,
+                            time_units=time_units, sweep=sweep, plot_mean=plot_mean)
+            return result
+        finally:
+            # Restore original data
+            self._current_data = current_data_orig
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig
+
+
+    def _plot_overlay_headstages(self, headstage, plot_current, plot_voltage, 
+                            height_ratios, marker_1, marker_2, time_units, sweep):
+        """
+        Internal method to plot overlayed headstages for a specific sweep.
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        # Determine which headstages to plot
+        if isinstance(headstage, (int, float)):
+            headstages_to_plot = [int(headstage)]
+        elif isinstance(headstage, (list, tuple)):
+            headstages_to_plot = [int(h) for h in headstage]
+        elif headstage == 'all':
+            headstages_to_plot = list(range(self.num_headstages))
+        else:
+            raise ValueError(f"Invalid headstage parameter: {headstage}")
+        
+        # Validate headstages
+        for hs in headstages_to_plot:
+            if hs < 0 or hs >= self.num_headstages:
+                raise ValueError(f"Invalid headstage {hs}. Must be 0-{self.num_headstages-1}")
+        
+        # Validate sweep
+        if not isinstance(sweep, (int, float)):
+            raise ValueError("overlay_headstages only works with specific sweep selection (not 'all')")
+        
+        sweep = int(sweep)
+        
+        # Get data dimensions
+        if self.concatenate_sweeps:
+            raise ValueError("overlay_headstages not supported with concatenated sweeps")
+        
+        # Shape should be: (num_headstages, num_sweeps, sweep_length)
+        if sweep >= self.current_data.shape[1]:
+            raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({self.current_data.shape[1]})")
+        
+        # Determine subplot configuration
+        n_subplots = int(plot_current) + int(plot_voltage and self.voltage_data is not None)
+        if n_subplots == 0:
+            raise ValueError("At least one of plot_current or plot_voltage must be True")
+        
+        # Set up time axis
+        time_axis = self.time
+        if time_units in ['ms', 'milliseconds']:
+            time_axis = time_axis * 1000
+            time_label = 'Time (ms)'
+        else:
+            time_label = 'Time (s)'
+        
+        # Set up figure and subplots
+        if n_subplots == 1:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            axes = [ax]
+        else:
+            if height_ratios is None:
+                height_ratios = [1] * n_subplots
+            fig, axes = plt.subplots(n_subplots, 1, figsize=(10, 8), 
+                                    height_ratios=height_ratios, sharex=True)
+            if not isinstance(axes, (list, np.ndarray)):
+                axes = [axes]
+        
+        # Color cycle for different headstages
+        colors = plt.cm.Reds(np.linspace(0.5, 1, len(headstages_to_plot)))
+        
+        subplot_idx = 0
+        
+        # Plot current data
+        if plot_current:
+            ax = axes[subplot_idx]
+            
+            for i, hs in enumerate(headstages_to_plot):
+                current_trace = self.current_data[hs, sweep]
+                ax.plot(time_axis, current_trace, color=colors[i], 
+                    label=f'Headstage {hs}', linewidth=1)
+            
+            ax.set_ylabel(f'Current ({self.current_unit})')
+            ax.grid(True, alpha=0.3)
+            if len(headstages_to_plot) > 1:
+                ax.legend()
+            
+            # Add markers
+            if marker_1 is not None:
+                marker_1_converted = marker_1 * 1000 if time_units in ['ms', 'milliseconds'] else marker_1
+                ax.axvline(marker_1_converted, color='red', linestyle='--', alpha=0.7, label='Marker 1')
+            if marker_2 is not None:
+                marker_2_converted = marker_2 * 1000 if time_units in ['ms', 'milliseconds'] else marker_2
+                ax.axvline(marker_2_converted, color='orange', linestyle='--', alpha=0.7, label='Marker 2')
+            
+            subplot_idx += 1
+        
+        # Plot voltage data
+        if plot_voltage and self.voltage_data is not None:
+            ax = axes[subplot_idx]
+            
+            for i, hs in enumerate(headstages_to_plot):
+                voltage_trace = self.voltage_data[hs, sweep]
+                ax.plot(time_axis, voltage_trace, color=colors[i], 
+                    label=f'Headstage {hs}', linewidth=1)
+            
+            ax.set_ylabel(f'Voltage ({self.voltage_unit})')
+            ax.grid(True, alpha=0.3)
+            if len(headstages_to_plot) > 1:
+                ax.legend()
+            
+            # Add markers
+            if marker_1 is not None:
+                marker_1_converted = marker_1 * 1000 if time_units in ['ms', 'milliseconds'] else marker_1
+                ax.axvline(marker_1_converted, color='red', linestyle='--', alpha=0.7, label='Marker 1')
+            if marker_2 is not None:
+                marker_2_converted = marker_2 * 1000 if time_units in ['ms', 'milliseconds'] else marker_2
+                ax.axvline(marker_2_converted, color='orange', linestyle='--', alpha=0.7, label='Marker 2')
+        
+        # Set x-axis label on bottom subplot
+        axes[-1].set_xlabel(time_label)
+        
+        # Set title
+        if len(headstages_to_plot) == 1:
+            title = f'{self.filename} , Sweep {sweep}'
+        else:
+            title = f'{self.filename} , Sweep {sweep}'
+        
+        fig.suptitle(title)
+        plt.tight_layout()
+        
+        return axes if len(axes) > 1 else axes[0]
+
+    def plot_multi_headstage2(self, headstage=0, plot_current=True, plot_voltage=False, 
+                            height_ratios=None, marker_1=None, marker_2=None, 
+                            time_units='s', sweep='all', plot_mean=False):
+        """
+        Plot data from multi-headstage recordings.
+        
+        Parameters
+        ----------
+        headstage : int, default=0
+            Which headstage to plot (0-indexed).
+        plot_current : bool, default=True
+            Whether to plot current data.
+        plot_voltage : bool, default=False
+            Whether to plot voltage data.
+        height_ratios : tuple, optional
+            Height ratios for subplots.
+        marker_1 : float, optional
+            Time position for first marker.
+        marker_2 : float, optional
+            Time position for second marker.
+        time_units : str, default='s'
+            Time units ('s' or 'ms').
+        sweep : int, 'all', or None, default='all'
+            Which sweep to plot.
+        plot_mean : bool, default=False
+            Whether to plot mean when sweep='all'.
+            
+        Returns
+        -------
+        matplotlib.axes or tuple of matplotlib.axes
+            Plot axes.
+        """
+        # Check if we have multi-dimensional data
+        if self.current_data.ndim < 2:
+            raise ValueError("This method is for multi-headstage data. Use regular plot() method instead.")
+        
+        # For multi-headstage data, temporarily extract single headstage data
+        if self.concatenate_sweeps:
+            # Shape: (num_headstages, total_datapoints)
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        else:
+            # Shape: (num_headstages, num_sweeps, sweep_length)
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        
+        try:
+            # Use the regular plot method
+            result = self.plot(plot_current=plot_current, plot_voltage=plot_voltage, 
+                            height_ratios=height_ratios, marker_1=marker_1, marker_2=marker_2,
+                            time_units=time_units, sweep=sweep, plot_mean=plot_mean)
+            return result
+        finally:
+            # Restore original data
+            self._current_data = current_data_orig
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig
+
+
+    def get_measurements_multi_headstage(self, start_time: float, end_time: float, 
+                                        headstage=0, measurement_type: str = 'mean', 
+                                        time_units: str = 's', sweep: int = None):
+        """
+        Extract measurements from multi-headstage data within a specified time window.
+        
+        Parameters
+        ----------
+        start_time : float
+            Start time of the measurement window.
+        end_time : float
+            End time of the measurement window.
+        headstage : int, default=0
+            Which headstage to measure (0-indexed).
+        measurement_type : str, default='mean'
+            Type of measurement ('mean', 'max', 'min', 'peak').
+        time_units : str, default='s'
+            Time units ('s' or 'ms').
+        sweep : int, optional
+            Which sweep to measure.
+            
+        Returns
+        -------
+        tuple or list of tuples
+            Measurement results (current_measurement, voltage_measurement).
+        """
+        # Check if we have multi-dimensional data
+        if self.current_data.ndim < 2:
+            raise ValueError("This method is for multi-headstage data. Use regular get_measurements() method instead.")
+        
+        # Temporarily extract single headstage data
+        if self.concatenate_sweeps:
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        else:
+            current_data_orig = self.current_data
+            voltage_data_orig = self.voltage_data
+            
+            self._current_data = current_data_orig[headstage]
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig[headstage]
+        
+        try:
+            # Use the regular get_measurements method
+            result = self.get_measurements(start_time=start_time, end_time=end_time,
+                                        measurement_type=measurement_type, 
+                                        time_units=time_units, sweep=sweep)
+            return result
+        finally:
+            # Restore original data
+            self._current_data = current_data_orig
+            if voltage_data_orig is not None:
+                self._voltage_data = voltage_data_orig
+
+
+    def subtract_baseline(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', 
+                        channel: str = 'current', headstage: int | str = 'all'):
+        """
+        Subtract baseline current and voltage from the data using measurements from a specified time window.
+        Works with both single and multi-headstage recordings.
+        
+        Parameters
+        ----------
+        start_time : float, default=0
+            Start time of the baseline measurement window.
+        end_time : float, default=1
+            End time of the baseline measurement window.
+        time_units : str, default='ms'
+            Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
+        channel : str, default='current'
+            Which channel(s) to apply baseline correction to. Options: 'current', 'voltage', 'all'.
+        headstage : int or 'all', default='all'
+            For multi-headstage data, which headstage(s) to correct. 
+            If int, corrects specific headstage. If 'all', corrects all headstages.
+            Ignored for single-headstage data.
+        
+        Raises
+        ------
+        ValueError
+            If no current data is available, if baseline measurement fails, or if invalid parameters.
+        """
+        if self.current_data is None:
+            raise ValueError("No current data available for baseline subtraction")
+        
+        # Validate channel parameter
+        valid_channels = ['current', 'voltage', 'all']
+        if channel not in valid_channels:
+            raise ValueError(f"Invalid channel '{channel}'. Must be one of: {valid_channels}")
+        
+        # Check if voltage channel is requested but not available
+        if channel in ['voltage', 'all'] and self.voltage_data is None:
+            if channel == 'voltage':
+                raise ValueError("Voltage data not available for baseline correction")
+            else:
+                # For 'all', just warn and proceed with current only
+                print("Warning: Voltage data not available, applying baseline correction to current only")
+                channel = 'current'
+        
+        # Determine if we have multi-headstage data
+        is_multi_headstage = self.num_headstages > 1
+        
+        if not is_multi_headstage:
+            # Use original single-headstage logic
+            try:
+                baseline_current, baseline_voltage = self.get_measurements(
+                    start_time=start_time, 
+                    end_time=end_time, 
+                    measurement_type='mean', 
+                    time_units=time_units
+                )
+                print("BASELINE SUBTRACTED:")
+                
+                if self.current_data.ndim == 1:
+                    # Handle 1D data (concatenated sweeps)
+                    if channel in ['current', 'all']:
+                        print(f"Baseline current: {baseline_current}") 
+                        self.current_data = self.current_data - baseline_current
+                    
+                    if channel in ['voltage', 'all'] and self.voltage_data is not None and baseline_voltage is not None:
+                        print(f"Baseline voltage: {baseline_voltage}") 
+                        self.voltage_data = self.voltage_data - baseline_voltage
+                        
+                else:
+                    # Handle 2D data (separate sweeps)
+                    if channel in ['current', 'all']:
+                        print(f"Baseline currents: {baseline_current}") 
+                        for i in range(self.current_data.shape[0]):
+                            self.current_data[i] = self.current_data[i] - baseline_current[i]
+                            
+                    if channel in ['voltage', 'all'] and self.voltage_data is not None and baseline_voltage is not None:
+                        print(f"Baseline voltages: {baseline_voltage}") 
+                        for i in range(self.voltage_data.shape[0]):
+                            self.voltage_data[i] = self.voltage_data[i] - baseline_voltage[i]
+                            
+            except Exception as e:
+                raise ValueError(f"Failed to subtract baseline: {str(e)}")
+        
+        else:
+            # Handle multi-headstage data
+            # Validate headstage parameter
+            if isinstance(headstage, int):
+                if headstage >= self.num_headstages or headstage < 0:
+                    raise ValueError(f"Invalid headstage {headstage}. Must be 0-{self.num_headstages-1} or 'all'")
+                headstages_to_process = [headstage]
+            elif headstage == 'all':
+                headstages_to_process = list(range(self.num_headstages))
+            else:
+                raise ValueError(f"Invalid headstage parameter '{headstage}'. Must be int or 'all'")
+            
+            print("BASELINE SUBTRACTED:")
+            
+            try:
+                for hs in headstages_to_process:
+                    # Get baseline measurements for this headstage
+                    baseline_current, baseline_voltage = self.get_measurements_multi_headstage(
+                        start_time=start_time, 
+                        end_time=end_time, 
+                        headstage=hs,
+                        measurement_type='mean', 
+                        time_units=time_units
+                    )
+                    
+                    if self.concatenate_sweeps:
+                        # Shape: (num_headstages, total_datapoints)
+                        if channel in ['current', 'all']:
+                            print(f"Headstage {hs} - Baseline current: {baseline_current}")
+                            self.current_data[hs] = self.current_data[hs] - baseline_current
+                        
+                        if channel in ['voltage', 'all'] and self.voltage_data is not None and baseline_voltage is not None:
+                            print(f"Headstage {hs} - Baseline voltage: {baseline_voltage}")
+                            self.voltage_data[hs] = self.voltage_data[hs] - baseline_voltage
+                            
+                    else:
+                        # Shape: (num_headstages, num_sweeps, sweep_length)
+                        # baseline_current and baseline_voltage are arrays with one value per sweep
+                        if channel in ['current', 'all']:
+                            print(f"Headstage {hs} - Baseline currents: {baseline_current}")
+                            for sweep_idx in range(self.current_data.shape[1]):
+                                self.current_data[hs, sweep_idx] = self.current_data[hs, sweep_idx] - baseline_current[sweep_idx]
+                        
+                        if channel in ['voltage', 'all'] and self.voltage_data is not None and baseline_voltage is not None:
+                            print(f"Headstage {hs} - Baseline voltages: {baseline_voltage}")
+                            for sweep_idx in range(self.voltage_data.shape[1]):
+                                self.voltage_data[hs, sweep_idx] = self.voltage_data[hs, sweep_idx] - baseline_voltage[sweep_idx]
+                                
+            except Exception as e:
+                raise ValueError(f"Failed to subtract baseline: {str(e)}")
+
+    def get_step_events(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
+                        polarity: str = 'positive', time_units: str = 's', sweep: int = None,
+                        headstage: int | str = 'all'):
+        '''Extract step event times from any channel data.
+        
+        Parameters
+        ----------
+        threshold: float
+            Threshold value for detecting step events.
+        channel: str, default='ttl'
+            Which channel to analyze ('current', 'voltage', or 'ttl').
+        edge: str, default='rising'
+            Type of edge to detect ('rising', 'falling', or 'both').
+        polarity: str, default='positive'
+            Step polarity to detect ('positive' for steps above threshold, 'negative' for steps below threshold).
+        time_units: str, default='s'
+            Units for returned event times ('s' or 'ms').
+        sweep: int, optional
+            For 2D/3D data (separate sweeps), specify which sweep to analyze.
+            If None and data has separate sweeps, analyzes all sweeps.
+        headstage: int or 'all', default='all'
+            For multi-headstage data, which headstage(s) to analyze.
+            If int, analyzes specific headstage. If 'all', analyzes all headstages.
+            
+        Returns
+        -------
+        np.ndarray, list, or dict
+            - Single headstage, concatenated sweeps: np.ndarray of event times
+            - Single headstage, separate sweeps: list of np.ndarray (one per sweep)
+            - Multi-headstage, concatenated sweeps: dict {headstage_idx: np.ndarray}
+            - Multi-headstage, separate sweeps: dict {headstage_idx: list of np.ndarray}
+            
+        Raises
+        ------
+        ValueError
+            If no data is available for the specified channel or invalid parameters.
+        '''
+        # Validate parameters
+        if channel not in ['current', 'voltage', 'ttl']:
+            raise ValueError("Channel must be 'current', 'voltage', or 'ttl'")
+            
+        if edge not in ['rising', 'falling', 'both']:
+            raise ValueError("Edge must be 'rising', 'falling', or 'both'")
+        
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("Polarity must be 'positive' or 'negative'")
+        
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
+        
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        elif channel == 'voltage':
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
+        else:  # ttl
+            if self.ttl_data is None:
+                raise ValueError("No TTL data available")
+            data = self.ttl_data
+        
+        def find_step_events_in_trace(trace_data):
+            """Helper function to find step events in a 1D trace"""
+            # Apply polarity logic to the threshold comparison
+            if polarity == 'positive':
+                above_threshold = trace_data > threshold
+            else:  # negative polarity
+                above_threshold = trace_data < threshold
+            
+            if edge == 'rising':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == 1)[0]
+            elif edge == 'falling':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == -1)[0]
+            else:  # both
+                crossings = np.where(np.abs(np.diff(above_threshold.astype(int))) == 1)[0]
+            
+            # Convert to times
+            event_times = crossings * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            return event_times
+        
+        # Determine if we have multi-headstage data
+        is_multi_headstage = self.num_headstages > 1
+        
+        if not is_multi_headstage:
+            # Use original single-headstage logic
+            if data.ndim == 1:
+                # 1D data (concatenated sweeps)
+                return find_step_events_in_trace(data)
+            else:
+                # 2D data (separate sweeps)
+                if sweep == 'all':
+                    sweep = None
+                if sweep is None:
+                    # Analyze all sweeps
+                    event_times_list = []
+                    for i in range(data.shape[0]):
+                        sweep_events = find_step_events_in_trace(data[i])
+                        event_times_list.append(sweep_events)
+                    return event_times_list
+                elif isinstance(sweep, (int, float)):
+                    # Analyze specific sweep
+                    if sweep >= data.shape[0]:
+                        raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                    return find_step_events_in_trace(data[sweep])
+        else:
+            # Handle multi-headstage data
+            # Validate headstage parameter
+            if isinstance(headstage, int):
+                if headstage >= self.num_headstages or headstage < 0:
+                    raise ValueError(f"Invalid headstage {headstage}. Must be 0-{self.num_headstages-1} or 'all'")
+                headstages_to_process = [headstage]
+            elif headstage == 'all':
+                headstages_to_process = list(range(self.num_headstages))
+            else:
+                raise ValueError(f"Invalid headstage parameter '{headstage}'. Must be int or 'all'")
+            
+            results = {}
+            
+            for hs in headstages_to_process:
+                if self.concatenate_sweeps:
+                    # Shape: (num_headstages, total_datapoints)
+                    headstage_data = data[hs]
+                    results[hs] = find_step_events_in_trace(headstage_data)
+                else:
+                    # Shape: (num_headstages, num_sweeps, sweep_length)
+                    headstage_data = data[hs]  # Shape: (num_sweeps, sweep_length)
+                    
+                    if sweep == 'all':
+                        sweep = None
+                    if sweep is None:
+                        # Analyze all sweeps for this headstage
+                        event_times_list = []
+                        for i in range(headstage_data.shape[0]):
+                            sweep_events = find_step_events_in_trace(headstage_data[i])
+                            event_times_list.append(sweep_events)
+                        results[hs] = event_times_list
+                    elif isinstance(sweep, (int, float)):
+                        # Analyze specific sweep for this headstage
+                        if sweep >= headstage_data.shape[0]:
+                            raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({headstage_data.shape[0]})")
+                        results[hs] = find_step_events_in_trace(headstage_data[sweep])
+            
+            # Return format depends on whether single or multiple headstages requested
+            if len(headstages_to_process) == 1:
+                return results[headstages_to_process[0]]
+            else:
+                return results
+
+    def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
+            timepoint_2: float = None, preserve_metadata: bool = True, headstage: int | str = 'all'):
+        """
+        Crop the trace data between two timepoints and return a new Trace object.
+        Works with both single and multi-headstage recordings.
+        
+        Parameters
+        ----------
+        timepoint : float, optional
+            The first timepoint for cropping. If None, defaults to 0 (start of trace).
+        window : float, optional
+            The window size from the first timepoint. If timepoint_2 is provided, this parameter is ignored.
+            Sets the second timepoint as (timepoint + window).
+        time_units : str, default='s'
+            Time units for timepoint, window, and timepoint_2. Options: 's' (seconds), 'ms' (milliseconds).
+        timepoint_2 : float, optional
+            Second timepoint. If provided, data is cropped between timepoint and timepoint_2.
+            If None and window is None, defaults to end of trace.
+        preserve_metadata : bool, default=True
+            Whether to preserve metadata (events, excluded_sweeps, etc.) in the new Trace object.
+        headstage : int or 'all', default='all'
+            For multi-headstage data, which headstage(s) to crop.
+            If int, crops specific headstage only. If 'all', crops all headstages.
+            Ignored for single-headstage data.
+        
+        Returns
+        -------
+        Trace
+            A new Trace object containing the cropped data.
+        
+        Raises
+        ------
+        ValueError
+            If no current data is available, if timepoints are out of bounds, or if time units are not recognized.
+        """
+        if self.current_data is None:
+            raise ValueError("No current data available for cropping")
+        
+        # Convert time units to seconds
+        if time_units in ['s', 'seconds']:
+            conversion_factor = 1.0
+        elif time_units in ['ms', 'milliseconds']:
+            conversion_factor = 1000.0
+        else:
+            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
+        
+        # Convert all inputs to seconds
+        timepoint_s = timepoint / conversion_factor if timepoint is not None else 0.0
+        window_s = window / conversion_factor if window is not None else None
+        timepoint_2_s = timepoint_2 / conversion_factor if timepoint_2 is not None else None
+        
+        # Determine start and end times
+        start_time = timepoint_s
+        
+        if timepoint_2_s is not None:
+            # Use explicit second timepoint
+            end_time = timepoint_2_s
+            crop_info = f"_crop_{timepoint:.3f}to{timepoint_2:.3f}{time_units}"
+        elif window_s is not None:
+            # Use window to calculate end time
+            end_time = start_time + window_s
+            crop_info = f"_crop_{timepoint if timepoint is not None else 0:.3f}+{window:.3f}{time_units}"
+        else:
+            # Default to end of trace
+            end_time = self.total_time
+            crop_info = f"_crop_{timepoint if timepoint is not None else 0:.3f}toEnd{time_units}"
+                
+        # Ensure start_time < end_time
+        if start_time > end_time:
+            start_time, end_time = end_time, start_time
+        
+        # Validate time bounds
+        if start_time < 0:
+            start_time = 0.0
+            print(f"Warning: Start time adjusted to 0 s (was {start_time:.6f} s)")
+  
+        if end_time > self.total_time:
+            end_time = self.total_time
+            print(f"Warning: End time adjusted to {self.total_time:.6f} s (was {end_time:.6f} s)")
+
+        if start_time >= end_time:
+            raise ValueError("Start time must be less than end time")
+        
+        # Convert times to sample indices
+        start_idx = int(start_time / self.sampling)
+        end_idx = int(end_time / self.sampling)
+        
+        # Determine data dimensions and validate indices
+        is_multi_headstage = self.num_headstages > 1
+        
+        if is_multi_headstage:
+            # Multi-headstage data
+            if self.concatenate_sweeps:
+                # Shape: (num_headstages, total_datapoints)
+                max_idx = self.current_data.shape[1]
+            else:
+                # Shape: (num_headstages, num_sweeps, sweep_length)
+                max_idx = self.current_data.shape[2]
+        else:
+            # Single-headstage data
+            if self.concatenate_sweeps:
+                # Shape: (total_datapoints,)
+                max_idx = len(self.current_data)
+            else:
+                # Shape: (num_sweeps, sweep_length)
+                max_idx = self.current_data.shape[1]
+        
+        # Ensure we don't exceed array bounds
+        start_idx = max(0, start_idx)
+        end_idx = min(max_idx, end_idx)
+        
+        if start_idx >= end_idx:
+            raise ValueError("Invalid time window results in empty data")
+        
+        # Handle headstage parameter for multi-headstage data
+        if is_multi_headstage:
+            if isinstance(headstage, int):
+                if headstage >= self.num_headstages or headstage < 0:
+                    raise ValueError(f"Invalid headstage {headstage}. Must be 0-{self.num_headstages-1} or 'all'")
+                headstages_to_crop = [headstage]
+                crop_info += f"_hs{headstage}"
+            elif headstage == 'all':
+                headstages_to_crop = list(range(self.num_headstages))
+            else:
+                raise ValueError(f"Invalid headstage parameter '{headstage}'. Must be int or 'all'")
+        
+        # Crop the data
+        if not is_multi_headstage:
+            # Single-headstage logic (unchanged from original)
+            if self.concatenate_sweeps:
+                # Handle 1D data (concatenated sweeps)
+                cropped_current = self.current_data[start_idx:end_idx]
+                cropped_voltage = self.voltage_data[start_idx:end_idx] if self.voltage_data is not None else None
+                cropped_ttl = self.ttl_data[start_idx:end_idx] if self.ttl_data is not None else None
+            else:
+                # Handle 2D data (separate sweeps)
+                cropped_current = self.current_data[:, start_idx:end_idx]
+                cropped_voltage = self.voltage_data[:, start_idx:end_idx] if self.voltage_data is not None else None
+                cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
+        else:
+            # Multi-headstage logic
+            if self.concatenate_sweeps:
+                # Shape: (num_headstages, total_datapoints)
+                if headstage == 'all':
+                    cropped_current = self.current_data[:, start_idx:end_idx]
+                    cropped_voltage = self.voltage_data[:, start_idx:end_idx] if self.voltage_data is not None else None
+                    cropped_ttl = self.ttl_data[:, start_idx:end_idx] if self.ttl_data is not None else None
+                else:
+                    # Crop specific headstage - result will be single-headstage format
+                    cropped_current = self.current_data[headstage, start_idx:end_idx]
+                    cropped_voltage = self.voltage_data[headstage, start_idx:end_idx] if self.voltage_data is not None else None
+                    cropped_ttl = self.ttl_data[headstage, start_idx:end_idx] if self.ttl_data is not None else None
+            else:
+                # Shape: (num_headstages, num_sweeps, sweep_length)
+                if headstage == 'all':
+                    cropped_current = self.current_data[:, :, start_idx:end_idx]
+                    cropped_voltage = self.voltage_data[:, :, start_idx:end_idx] if self.voltage_data is not None else None
+                    cropped_ttl = self.ttl_data[:, :, start_idx:end_idx] if self.ttl_data is not None else None
+                else:
+                    # Crop specific headstage - result will be single-headstage format
+                    cropped_current = self.current_data[headstage, :, start_idx:end_idx]
+                    cropped_voltage = self.voltage_data[headstage, :, start_idx:end_idx] if self.voltage_data is not None else None
+                    cropped_ttl = self.ttl_data[headstage, :, start_idx:end_idx] if self.ttl_data is not None else None
+        
+        # Create new filename indicating the crop
+        new_filename = self.filename.replace('.', crop_info + '.') if self.filename else f"cropped_trace{crop_info}.dat"
+        
+        # Create new Trace object
+        cropped_trace = Trace(
+            current_data=cropped_current,
+            sampling_interval=self.sampling,
+            current_unit=self.current_unit,
+            filename=new_filename,
+            voltage_data=cropped_voltage,
+            voltage_unit=self.voltage_unit,
+            ttl_data=cropped_ttl,
+            ttl_unit=self.ttl_unit,
+            concatenate_sweeps=self.concatenate_sweeps
+        )
+        
+        # Preserve metadata if requested
+        if preserve_metadata:
+            # Copy events if they exist and adjust their timing
+            if hasattr(self, 'events') and len(self.events) > 0:
+                # Filter events that fall within the cropped time window
+                # and adjust their timing relative to the new start
+                original_events = np.array(self.events)
+                if original_events.size > 0:
+                    # Assuming events are stored as [time, ...] format
+                    if original_events.ndim == 1:
+                        event_times = original_events
+                    else:
+                        event_times = original_events[:, 0]  # Assume first column is time
+                    
+                    # Convert to seconds if needed
+                    event_times_s = event_times * self.sampling  # Convert from sample indices to seconds
+                    
+                    # Find events within the cropped window
+                    mask = (event_times_s >= start_time) & (event_times_s < end_time)
+                    if np.any(mask):
+                        cropped_events = original_events[mask] if original_events.ndim > 1 else original_events[mask]
+                        # Adjust timing - subtract the start time and convert back to sample indices
+                        if cropped_events.size > 0:
+                            if cropped_events.ndim == 1:
+                                cropped_events = cropped_events - start_idx
+                            else:
+                                cropped_events[:, 0] = cropped_events[:, 0] - start_idx
+                            cropped_trace.events = cropped_events
+            
+            # Copy other metadata attributes if they exist
+            for attr in ['excluded_sweeps', 'excluded_series', 'Rseries']:
+                if hasattr(self, attr):
+                    setattr(cropped_trace, attr, getattr(self, attr))
+        
+        return cropped_trace
+
+    def analyze_action_potentials(self, min_spike_amplitude=5.0, max_width=10.0, min_ISI=1.0, 
+                                headstage=0, sweep=None, return_dict=False):
+        """
+        Analyze action potentials/spikes in voltage data using 3rd derivative peak detection.
+        
+        Parameters
+        ----------
+        min_spike_amplitude : float, default=5.0
+            Minimum spike amplitude in voltage units to exclude small fluctuations.
+        max_width : float, default=10.0
+            Maximum spike width at half-max in milliseconds to exclude unreasonably wide events.
+        min_ISI : float, default=1.0
+            Minimum inter-spike interval in milliseconds to prevent double-counting of same spike.
+        headstage : int, default=0
+            Which headstage to analyze (for multi-headstage recordings).
+        sweep : int or None, default=None
+            Which sweep to analyze. If None and data has separate sweeps, analyzes all sweeps.
+        return_dict : bool, default=False
+            If True, returns results as dictionary with labeled fields.
+            
+        Returns
+        -------
+        tuple or dict or list
+            If return_dict=False:
+                - For single sweep: tuple of arrays (spike_times, threshold_voltages, peak_voltages, 
+                spike_amplitudes, spike_widths)
+                - For multiple sweeps: list of tuples
+            If return_dict=True:
+                - Dictionary or list of dictionaries with keys: 'spike_times', 'threshold_voltages',
+                'peak_voltages', 'spike_amplitudes', 'spike_widths'
+        
+        Raises
+        ------
+        ValueError
+            If no voltage data is available.
+        """
+        if self.voltage_data is None:
+            raise ValueError("No voltage data available for spike analysis")
+        
+        # Get the voltage data for the specified headstage
+        if self.num_headstages > 1:
+            if self.concatenate_sweeps:
+                # Shape: (num_headstages, total_datapoints)
+                voltage = self.voltage_data[headstage]
+            else:
+                # Shape: (num_headstages, num_sweeps, sweep_length)
+                voltage = self.voltage_data[headstage]
+        else:
+            voltage = self.voltage_data
+        
+        # Convert parameters to samples
+        min_ISI_samples = int(min_ISI * 0.001 / self.sampling)  # Convert ms to samples
+        max_width_samples = int(max_width * 0.001 / self.sampling)  # Convert ms to samples
+        
+        def analyze_single_trace(v_data):
+            """Analyze spikes in a single voltage trace."""
+            # Calculate derivatives
+            dv_dt = np.gradient(v_data)
+            d2v_dt2 = np.gradient(dv_dt)
+            d3v_dt3 = np.gradient(d2v_dt2)
+            
+            # Find peaks in 3rd derivative (spike times)
+            from scipy.signal import find_peaks
+            spike_indices, _ = find_peaks(d3v_dt3, distance=min_ISI_samples)
+            
+            if len(spike_indices) == 0:
+                # No spikes found
+                empty_array = np.array([])
+                return (empty_array, empty_array, empty_array, empty_array, empty_array)
+            
+            # Initialize output arrays
+            valid_spikes = []
+            threshold_voltages = []
+            peak_voltages = []
+            spike_amplitudes = []
+            spike_widths = []
+            
+            for spike_idx in spike_indices:
+                # Threshold voltage is voltage at spike time
+                v_threshold = v_data[spike_idx]
+                
+                # Find peak voltage after threshold
+                # Search window: from spike time to spike time + max_width
+                search_end = min(spike_idx + max_width_samples, len(v_data))
+                if search_end <= spike_idx:
+                    continue
+                    
+                peak_idx = spike_idx + np.argmax(v_data[spike_idx:search_end])
+                v_peak = v_data[peak_idx]
+                
+                # Calculate spike amplitude
+                amplitude = v_peak - v_threshold
+                
+                # Skip if amplitude is too small
+                if amplitude < min_spike_amplitude:
+                    continue
+                
+                # Find spike width at half-max
+                half_max_voltage = v_threshold + (amplitude / 2)
+                
+                # Find where voltage drops back below half-max after the peak
+                after_peak = v_data[peak_idx:search_end]
+                below_half = np.where(after_peak < half_max_voltage)[0]
+                
+                if len(below_half) > 0:
+                    # Width is from threshold to first point below half-max after peak
+                    width_samples = peak_idx - spike_idx + below_half[0]
+                    width_ms = width_samples * self.sampling * 1000
+                    
+                    # Skip if width is too large
+                    if width_ms > max_width:
+                        continue
+                else:
+                    # Couldn't find return to half-max, skip this spike
+                    continue
+                
+                # This is a valid spike
+                valid_spikes.append(spike_idx)
+                threshold_voltages.append(v_threshold)
+                peak_voltages.append(v_peak)
+                spike_amplitudes.append(amplitude)
+                spike_widths.append(width_ms)
+            
+            # Convert to arrays
+            if len(valid_spikes) > 0:
+                spike_times = np.array(valid_spikes) * self.sampling * 1000  # Convert to ms
+                threshold_voltages = np.array(threshold_voltages)
+                peak_voltages = np.array(peak_voltages)
+                spike_amplitudes = np.array(spike_amplitudes)
+                spike_widths = np.array(spike_widths)
+            else:
+                # No valid spikes found
+                spike_times = np.array([])
+                threshold_voltages = np.array([])
+                peak_voltages = np.array([])
+                spike_amplitudes = np.array([])
+                spike_widths = np.array([])
+            
+            return (spike_times, threshold_voltages, peak_voltages, spike_amplitudes, spike_widths)
+        
+        # Process data based on structure
+        if voltage.ndim == 1 or (voltage.ndim == 2 and self.concatenate_sweeps):
+            # Single trace (1D or concatenated)
+            if voltage.ndim == 2:
+                # This shouldn't happen based on data structure, but handle it
+                voltage = voltage.flatten()
+            
+            results = analyze_single_trace(voltage)
+            
+            if return_dict:
+                return {
+                    'spike_times': results[0],
+                    'threshold_voltages': results[1],
+                    'peak_voltages': results[2],
+                    'spike_amplitudes': results[3],
+                    'spike_widths': results[4]
+                }
+            else:
+                return results
+        
+        else:
+            # Multiple sweeps (2D data)
+            if sweep is not None:
+                # Analyze specific sweep
+                if sweep >= voltage.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({voltage.shape[0]})")
+                
+                results = analyze_single_trace(voltage[sweep])
+                
+                if return_dict:
+                    return {
+                        'spike_times': results[0],
+                        'threshold_voltages': results[1],
+                        'peak_voltages': results[2],
+                        'spike_amplitudes': results[3],
+                        'spike_widths': results[4]
+                    }
+                else:
+                    return results
+            
+            else:
+                # Analyze all sweeps
+                all_results = []
+                
+                for sweep_idx in range(voltage.shape[0]):
+                    results = analyze_single_trace(voltage[sweep_idx])
+                    
+                    if return_dict:
+                        all_results.append({
+                            'spike_times': results[0],
+                            'threshold_voltages': results[1],
+                            'peak_voltages': results[2],
+                            'spike_amplitudes': results[3],
+                            'spike_widths': results[4]
+                        })
+                    else:
+                        all_results.append(results)
+                
+                return all_results
+
 
     @classmethod
     def from_axon_file(cls, filename: str, channels: int | list=0, scaling: float | list=1.0, 
@@ -484,6 +1832,317 @@ class Trace():
                 ttl_data=ttl_data, ttl_unit=ttl_unit,
                 concatenate_sweeps=concatenate_sweeps)
 
+    def plot(self, plot_current=True, plot_voltage=False, plot_ttl=False, height_ratios=None, 
+            marker_1=None, marker_2=None, time_units='s', sweep='all', plot_mean=False):
+        ''' Plots the trace with optional markers
+        
+        Parameters
+        ----------
+        plot_current: bool, default=True
+            Whether to plot current data (if available).
+        plot_voltage: bool, default=False
+            Whether to plot voltage data as well (if available).
+        plot_ttl: bool, default=False
+            Whether to plot TTL data as well (if available).
+        height_ratios: tuple, default=None
+            Height ratios for subplots. If None, defaults based on number of plots:
+            - Single plot: N/A
+            - Two plots: (3, 1) or (1, 1) if both are non-current
+            - Three plots: (3, 1, 1) if current included, (1, 1, 1) if current not included
+        marker_1: float, default=None
+            Time position for first marker. If provided, adds a vertical line at this position.
+        marker_2: float, default=None
+            Time position for second marker. If provided, adds a vertical line at this position.
+        time_units: str, default='s'
+            Units for marker positions. Options: 's' (seconds), 'ms' (milliseconds).
+        sweep: int, 'all', or None, default=None
+            Which sweep to plot if data is not concatenated. If None, plots first sweep.
+            If 'all', plots all sweeps superimposed with mean in red.
+        plot_mean: bool, default=False
+            Whether to plot the mean trace in red when sweep='all'.
+        
+        Returns
+        -------
+        matplotlib.axes or tuple of matplotlib.axes
+            Single axis if only one channel plotted, tuple of axes if multiple plots.
+            Order depends on which channels are plotted.
+            
+        Raises
+        ------
+        ValueError
+            If no channels are selected for plotting or if required data is not available.
+        '''
+        # Check that at least one channel is selected for plotting
+        if not any([plot_current, plot_voltage, plot_ttl]):
+            raise ValueError("At least one channel must be selected for plotting")
+        
+        # Check data availability and what we can actually plot
+        has_current = self.current_data is not None and plot_current
+        has_voltage = self.voltage_data is not None and plot_voltage
+        has_ttl = self.ttl_data is not None and plot_ttl
+        
+        # Validate that we have data for the requested channels
+        channels_to_plot = []
+        channel_data = []
+        channel_labels = []
+        channel_units = []
+        
+        if plot_current:
+            if self.current_data is None:
+                raise ValueError("Current data not available for plotting")
+            channels_to_plot.append('current')
+            channel_labels.append('Current')
+            channel_units.append(self.current_unit)
+        
+        if plot_voltage:
+            if self.voltage_data is None:
+                raise ValueError("Voltage data not available for plotting")
+            channels_to_plot.append('voltage')
+            channel_labels.append('Voltage')
+            channel_units.append(self.voltage_unit)
+        
+        if plot_ttl:
+            if self.ttl_data is None:
+                raise ValueError("TTL data not available for plotting")
+            channels_to_plot.append('ttl')
+            channel_labels.append('TTL')
+            channel_units.append(self.ttl_unit)
+        
+        # Convert marker positions to seconds if needed
+        markers = []
+        for marker in [marker_1, marker_2]:
+            if marker is not None:
+                markers.append(marker)
+            else:
+                markers.append(None)
+        
+        marker_1_s, marker_2_s = markers
+        
+        # Determine what data to plot based on sweep parameter
+        def get_data_for_channel(channel_name):
+            if channel_name == 'current':
+                data = self.current_data
+            elif channel_name == 'voltage':
+                data = self.voltage_data
+            elif channel_name == 'ttl':
+                data = self.ttl_data
+            
+            if self.concatenate_sweeps:
+                return data
+            else:
+                # Handle separate sweeps
+                if sweep == 'all':
+                    return data  # All sweeps
+                elif isinstance(sweep, int):
+                    if sweep >= self.num_sweeps:
+                        raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
+                    return data[sweep][np.newaxis, :] # Specific sweep
+                elif isinstance(sweep, list or tuple):
+                    idx = range(sweep[0], sweep[1])
+                    return data[idx]
+                else:
+                    raise ValueError("sweep must be None, 'all', or a valid sweep index")
+        
+        # Get time axis
+        time_axis = self.time
+        if time_units in ['ms', 'milliseconds']:
+            time_axis = time_axis * 1000
+        
+        # Determine number of subplots and height ratios
+        num_plots = len(channels_to_plot)
+        
+        if height_ratios is None:
+            if num_plots == 1:
+                height_ratios = None
+            elif num_plots == 2:
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1)
+                else:
+                    height_ratios = (1, 1)
+            else:  # num_plots == 3
+                # Give current channel more space if it's included
+                if has_current:
+                    height_ratios = (3, 1, 1)
+                else:
+                    height_ratios = (1, 1, 1)
+        
+        # Create subplots
+        if num_plots == 1:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            axes = [ax]
+        else:
+            fig, axes = plt.subplots(num_plots, 1, figsize=(10, 2 + 2*num_plots), 
+                                    sharex=True, height_ratios=height_ratios)
+            if not isinstance(axes, (list, np.ndarray)):
+                axes = [axes]
+        
+        # Plot each requested channel
+        for i, (channel_name, label, unit) in enumerate(zip(channels_to_plot, channel_labels, channel_units)):
+            ax = axes[i]
+            data_to_plot = get_data_for_channel(channel_name)
+            
+            # Plot the data
+            if not self.concatenate_sweeps:
+                # Plot all sweeps
+                if plot_mean:
+                    # Plot individual sweeps with transparency
+                    for sweep_idx in range(data_to_plot.shape[0]):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='gray', alpha=0.3, linewidth=0.5)
+                    # Plot mean in red
+                    mean_data = np.mean(data_to_plot, axis=0)
+                    ax.plot(time_axis, mean_data, color='red', linewidth=1, label='Mean')
+                else:
+                    # Plot all sweeps in black
+                    for sweep_idx in range(data_to_plot.shape[0]):
+                        ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
+            else:
+                # Plot all sweeps in black
+                ax.plot(time_axis, data_to_plot, color='black', alpha=1, linewidth=0.5)
+
+
+            # Set labels and formatting
+            ax.set_ylabel(f'{label} ({unit})')
+            ax.grid(True, alpha=0.3)
+        
+        # Set x-axis label on bottom subplot
+        if time_units in ['ms', 'milliseconds']:
+            axes[-1].set_xlabel('Time (ms)')
+        else:
+            axes[-1].set_xlabel('Time (s)')
+        
+        # Add markers to all subplots
+        for marker, label in [(marker_1_s, 'marker 1'), (marker_2_s, 'marker 2')]:
+            if marker is not None:
+                for ax in axes:
+                    ylims = ax.get_ylim()
+                    ax.vlines(marker, ylims[0]*0.8,ylims[1]*0.8, color='red', linestyle='-', linewidth=0.8)
+                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1]*0.9), fontsize=10, color='red', ha='center', va='bottom')
+        plt.tight_layout()
+        
+        # Return appropriate axes
+        if num_plots == 1:
+            return axes[0]
+        else:
+            return tuple(axes)
+
+    def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
+                            time_units: str = 's', sweep: int = None):
+        """
+        Extract measurements from current and voltage data within a specified time window.
+        
+        Parameters
+        ----------
+        start_time : float
+            Start time of the measurement window.
+        end_time : float
+            End time of the measurement window.
+        measurement_type : str, default='mean'
+            Type of measurement to extract. Options: 'mean', 'max', 'min', 'peak'.
+        time_units : str, default='s'
+            Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
+        sweep : int, optional
+            For 2D data, specify which sweep to measure. If None, measurements from all sweeps are returned.
+        
+        Returns
+        -------
+        tuple or list of tuples
+            For 1D data or when sweep is specified: (current_measurement, voltage_measurement)
+            For 2D data when sweep is None: list of tuples, one per sweep
+            voltage_measurement is None if no voltage data is available.
+        
+        Raises
+        ------
+        ValueError
+            If no current data is available, if time window is invalid, or if units are not recognized.
+        """
+        if self.current_data is None:
+            raise ValueError("No current data available")
+        
+        # Convert time to seconds if needed
+        if time_units in ['s','seconds']:
+            start_time_s = start_time
+            end_time_s = end_time
+        elif time_units in ['ms', 'milliseconds']:
+            start_time_s = start_time / 1000.0
+            end_time_s = end_time / 1000.0
+        else:
+            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
+        
+        if start_time_s < 0 or end_time_s > self.total_time:
+            raise ValueError("Time window exceeds data bounds")
+        
+        if start_time_s >= end_time_s:
+            raise ValueError("Start time must be less than end time")
+        
+        # Convert time to sample indices
+        start_idx = int(start_time_s / self.sampling)
+        end_idx = int(end_time_s / self.sampling)
+        
+        def calculate_measurement(data_window, measurement_type):
+            """Helper function to calculate measurement based on type"""
+            if measurement_type == 'mean':
+                return np.mean(data_window)
+            elif measurement_type == 'max':
+                return np.max(data_window)
+            elif measurement_type == 'min':
+                return np.min(data_window)
+            elif measurement_type == 'peak':
+                # Find peak (maximum absolute value)
+                abs_data = np.abs(data_window)
+                peak_idx = np.argmax(abs_data)
+                return data_window[peak_idx]
+            else:
+                raise ValueError(f"Unknown measurement type: {measurement_type}")
+        
+        if self.current_data.ndim == 1:
+            # Handle 1D data (concatenated sweeps)
+            current_window = self.current_data[start_idx:end_idx]
+            voltage_window = None
+            if self.voltage_data is not None:
+                voltage_window = self.voltage_data[start_idx:end_idx]
+            
+            current_measurement = calculate_measurement(current_window, measurement_type)
+            voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None            
+        else:
+            if sweep == 'all':
+                sweep = None
+            # Handle 2D data (separate sweeps)
+            if sweep is not None:
+                # Measure specific sweep
+                if sweep >= self.current_data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({self.current_data.shape[0]})")
+                
+                current_window = self.current_data[sweep, start_idx:end_idx]
+                voltage_window = None
+                if self.voltage_data is not None:
+                    voltage_window = self.voltage_data[sweep, start_idx:end_idx]
+                
+                current_measurement = calculate_measurement(current_window, measurement_type)
+                voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None
+                
+                return current_measurement, voltage_measurement
+            else:
+                # Measure all sweeps
+                # measurements = []
+                current_measurement = []
+                voltage_measurement = []
+                for i in range(self.current_data.shape[0]):
+                    current_window = self.current_data[i, start_idx:end_idx]
+                    voltage_window = None
+                    if self.voltage_data is not None:
+                        voltage_window = self.voltage_data[i, start_idx:end_idx]
+                    
+                    sweep_current_measurement = calculate_measurement(current_window, measurement_type)
+                    sweep_voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None
+                    
+                    current_measurement.append(sweep_current_measurement)
+                    voltage_measurement.append(sweep_voltage_measurement)  
+                current_measurement = np.array(current_measurement)
+                voltage_measurement = np.array(voltage_measurement)         
+
+        return current_measurement, voltage_measurement
+
     @classmethod
     def from_heka_file(cls, filename: str, rectype: str, group: int=0, load_series: list=[], exclude_series: list=[], 
                        exclude_sweeps: dict={}, scaling: float=1, unit: str=None, resample: bool=True,
@@ -617,66 +2276,112 @@ class Trace():
                    concatenate_sweeps=concatenate_sweeps)
 
     @classmethod
-    def from_h5_file(cls, filename: str, tracename: str='data', scaling: float=1e12, 
-                     sampling: float=2e-5, unit: str='pA', ttl_tracename: str=None,
-                     voltage_tracename: str=None, concatenate_sweeps: bool=True):
-        ''' Loads data from an hdf5 file. Name of the dataset needs to be specified.
-
+    def from_wavesurfer_h5_file(cls, filename: str, current_scaling: float = 1.0, 
+                            voltage_scaling: float = 1.0, current_unit: str = 'nA', 
+                            voltage_unit: str = 'V', concatenate_sweeps: bool = True,
+                            load_voltage: bool = True):
+        """
+        Loads data from a Wavesurfer-style HDF5 file.
+        
+        This method handles HDF5 files with the structure:
+        - header: containing metadata including sampling rate
+        - sweep_XXXX: groups containing 'analogScans' datasets
+        - analogScans: 2D arrays where row 0 = voltage, row 1 = current
+        
         Parameters
         ----------
         filename: str
             Path of the .h5 file to load.
-        tracename: str, default='data'
-            Name of the dataset in the file to be loaded as current data.
-        scaling: float, default=1e12
-            Scaling factor applied to the current data. Defaults to 1e12 (i.e. pA)
-        sampling: float, default=2e-5
-            The sampling interval of the data in seconds. Defaults to 20 microseconds (i.e. 50kHz sampling rate).
-        unit: string, default='pA'
-            Data unit string after scaling. Used for display purposes.
-        ttl_tracename: str, default=None
-            Name of the TTL dataset in the file. If None, no TTL data is loaded.
-        voltage_tracename: str, default=None
-            Name of the voltage dataset in the file. If None, no voltage data is loaded.
+        current_scaling: float, default=1.0
+            Scaling factor applied to the current data.
+        voltage_scaling: float, default=1.0
+            Scaling factor applied to the voltage data.
+        current_unit: str, default='nA'
+            Physical unit of the current data after scaling.
+        voltage_unit: str, default='V'
+            Physical unit of the voltage data after scaling.
         concatenate_sweeps: bool, default=True
             Whether to concatenate sweeps or keep them separate.
+        load_voltage: bool, default=True
+            Whether to load voltage data from row 0 of analogScans.
 
         Returns
         -------
         Trace
             An initialized Trace object.
 
-        Raises  
+        Raises
         ------
         FileNotFoundError
-            When the specified file or traces are not found.
-        '''
-        with h5py.File(filename, 'r') as f:
-            # Load current data
-            path = f.visit(lambda key : key if isinstance(f[key], h5py.Dataset) and key.split('/')[-1] == tracename else None)
-            if path is None:
-                raise FileNotFoundError(f'Current trace "{tracename}" not found in file')
-            current_data = f[path][:] * scaling
+            When the specified file is not found.
+        KeyError
+            When expected keys are not found in the HDF5 structure.
+        ValueError
+            When the data structure is not as expected.
+        """
+        if not Path(filename).suffix.lower() == '.h5':
+            raise ValueError('File must have .h5 extension')
+        
+        # Load the HDF5 file using the existing functions
+        data_dict = hdf5_to_dict(filename)
+        
+        # Extract sampling rate from header
+        if 'header' not in data_dict:
+            raise KeyError('Header not found in HDF5 file')
+        
+        header = data_dict['header']
+        if 'AcquisitionSampleRate' not in header:
+            raise KeyError('AcquisitionSampleRate not found in header')
+        
+        sample_rate = float(header['AcquisitionSampleRate'].flatten()[0])
+        sampling_interval = 1.0 / sample_rate
+        
+        # Find all sweep keys
+        sweep_keys = [key for key in data_dict.keys() if key.startswith('sweep_')]
+        if not sweep_keys:
+            raise ValueError('No sweep data found in file')
+        
+        # Sort sweep keys to ensure proper order
+        sweep_keys.sort()
+        
+        # Extract data from sweeps
+        current_sweeps = []
+        voltage_sweeps = []
+        
+        for sweep_key in sweep_keys:
+            sweep_data = data_dict[sweep_key]
             
-            # Load voltage data if specified
-            voltage_data = None
-            if voltage_tracename is not None:
-                voltage_path = f.visit(lambda key : key if isinstance(f[key], h5py.Dataset) and key.split('/')[-1] == voltage_tracename else None)
-                if voltage_path is None:
-                    raise FileNotFoundError(f'Voltage trace "{voltage_tracename}" not found in file')
-                voltage_data = f[voltage_path][:]
+            if 'analogScans' not in sweep_data:
+                raise KeyError(f'analogScans not found in {sweep_key}')
             
-            # Load TTL data if specified
-            ttl_data = None
-            if ttl_tracename is not None:
-                ttl_path = f.visit(lambda key : key if isinstance(f[key], h5py.Dataset) and key.split('/')[-1] == ttl_tracename else None)
-                if ttl_path is None:
-                    raise FileNotFoundError(f'TTL trace "{ttl_tracename}" not found in file')
-                ttl_data = f[ttl_path][:]
-
-        return cls(current_data=current_data, sampling_interval=sampling, current_unit=unit, 
-                  filename=Path(filename).name, voltage_data=voltage_data, ttl_data=ttl_data,
-                  concatenate_sweeps=concatenate_sweeps)
+            analog_scans = sweep_data['analogScans']
+            
+            # Validate shape - should be 2D with at least 2 rows
+            if len(analog_scans.shape) != 2 or analog_scans.shape[0] < 2:
+                raise ValueError(f'analogScans in {sweep_key} should be 2D array with at least 2 rows')
+            
+            # Extract voltage (row 0) and current (row 1)
+            voltage_sweep = analog_scans[0, :].astype(np.float64) * voltage_scaling
+            current_sweep = analog_scans[1, :].astype(np.float64) * current_scaling
+            
+            voltage_sweeps.append(voltage_sweep)
+            current_sweeps.append(current_sweep)
+        
+        # Organize data based on concatenate_sweeps flag
+        if concatenate_sweeps:
+            current_data = np.concatenate(current_sweeps)
+            voltage_data = np.concatenate(voltage_sweeps) if load_voltage else None
+        else:
+            current_data = np.array(current_sweeps)
+            voltage_data = np.array(voltage_sweeps) if load_voltage else None
+        
+        return cls(current_data=current_data, 
+                sampling_interval=sampling_interval,
+                current_unit=current_unit,
+                filename=Path(filename).name,
+                voltage_data=voltage_data,
+                voltage_unit=voltage_unit,
+                concatenate_sweeps=concatenate_sweeps)
 
     def remove_sweeps(self, sweeps: int | list[int]):
         """
@@ -713,7 +2418,112 @@ class Trace():
         import copy as copy_module
         return copy_module.deepcopy(self)
 
-    def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
+
+
+    def get_step_events2(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
+                        polarity: str = 'positive', time_units: str = 's', sweep: int = None):
+        '''Extract step event times from any channel data.
+        
+        Parameters
+        ----------
+        threshold: float
+            Threshold value for detecting step events.
+        channel: str, default='ttl'
+            Which channel to analyze ('current', 'voltage', or 'ttl').
+        edge: str, default='rising'
+            Type of edge to detect ('rising', 'falling', or 'both').
+        polarity: str, default='positive'
+            Step polarity to detect ('positive' for steps above threshold, 'negative' for steps below threshold).
+        time_units: str, default='s'
+            Units for returned event times ('s' or 'ms').
+        sweep: int, optional
+            For 2D data (separate sweeps), specify which sweep to analyze.
+            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
+            
+        Returns
+        -------
+        np.ndarray or list of np.ndarray
+            Array of event times in specified units. For 2D data when sweep is None,
+            returns a list with one array per sweep.
+            
+        Raises
+        ------
+        ValueError
+            If no data is available for the specified channel or invalid parameters.
+        '''
+        # Validate parameters
+        if channel not in ['current', 'voltage', 'ttl']:
+            raise ValueError("Channel must be 'current', 'voltage', or 'ttl'")
+            
+        if edge not in ['rising', 'falling', 'both']:
+            raise ValueError("Edge must be 'rising', 'falling', or 'both'")
+        
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("Polarity must be 'positive' or 'negative'")
+        
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
+        
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        elif channel == 'voltage':
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
+        else:  # ttl
+            if self.ttl_data is None:
+                raise ValueError("No TTL data available")
+            data = self.ttl_data
+        
+        def find_step_events_in_trace(trace_data):
+            """Helper function to find step events in a 1D trace"""
+            # Apply polarity logic to the threshold comparison
+            if polarity == 'positive':
+                above_threshold = trace_data > threshold
+            else:  # negative polarity
+                above_threshold = trace_data < threshold
+            
+            if edge == 'rising':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == 1)[0]
+            elif edge == 'falling':
+                crossings = np.where(np.diff(above_threshold.astype(int)) == -1)[0]
+            else:  # both
+                crossings = np.where(np.abs(np.diff(above_threshold.astype(int))) == 1)[0]
+            
+            # Convert to times
+            event_times = crossings * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            return event_times
+        
+        # Handle different data structures
+        if data.ndim == 1:
+            # 1D data (concatenated sweeps)
+            return find_step_events_in_trace(data)
+        else:
+            # 2D data (separate sweeps)
+            if sweep == 'all':
+                sweep=None
+            if sweep is None:
+                # Analyze all sweeps
+                event_times_list = []
+                for i in range(data.shape[0]):
+                    sweep_events = find_step_events_in_trace(data[i])
+                    event_times_list.append(sweep_events)
+                return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_step_events_in_trace(data[sweep])
+
+    def crop2(self, timepoint: float = None, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True):
         """
         Crop the trace data between two timepoints and return a new Trace object.
@@ -870,426 +2680,6 @@ class Trace():
                     setattr(cropped_trace, attr, getattr(self, attr))
         
         return cropped_trace
-
-    def plot(self, plot_current=True, plot_voltage=False, plot_ttl=False, height_ratios=None, 
-            marker_1=None, marker_2=None, time_units='s', sweep=None, plot_mean=False):
-        ''' Plots the trace with optional markers
-        
-        Parameters
-        ----------
-        plot_current: bool, default=True
-            Whether to plot current data (if available).
-        plot_voltage: bool, default=False
-            Whether to plot voltage data as well (if available).
-        plot_ttl: bool, default=False
-            Whether to plot TTL data as well (if available).
-        height_ratios: tuple, default=None
-            Height ratios for subplots. If None, defaults based on number of plots:
-            - Single plot: N/A
-            - Two plots: (3, 1) or (1, 1) if both are non-current
-            - Three plots: (3, 1, 1) if current included, (1, 1, 1) if current not included
-        marker_1: float, default=None
-            Time position for first marker. If provided, adds a vertical line at this position.
-        marker_2: float, default=None
-            Time position for second marker. If provided, adds a vertical line at this position.
-        time_units: str, default='s'
-            Units for marker positions. Options: 's' (seconds), 'ms' (milliseconds).
-        sweep: int, 'all', or None, default=None
-            Which sweep to plot if data is not concatenated. If None, plots first sweep.
-            If 'all', plots all sweeps superimposed with mean in red.
-        plot_mean: bool, default=False
-            Whether to plot the mean trace in red when sweep='all'.
-        
-        Returns
-        -------
-        matplotlib.axes or tuple of matplotlib.axes
-            Single axis if only one channel plotted, tuple of axes if multiple plots.
-            Order depends on which channels are plotted.
-            
-        Raises
-        ------
-        ValueError
-            If no channels are selected for plotting or if required data is not available.
-        '''
-        # Check that at least one channel is selected for plotting
-        if not any([plot_current, plot_voltage, plot_ttl]):
-            raise ValueError("At least one channel must be selected for plotting")
-        
-        # Check data availability and what we can actually plot
-        has_current = self.current_data is not None and plot_current
-        has_voltage = self.voltage_data is not None and plot_voltage
-        has_ttl = self.ttl_data is not None and plot_ttl
-        
-        # Validate that we have data for the requested channels
-        channels_to_plot = []
-        channel_data = []
-        channel_labels = []
-        channel_units = []
-        
-        if plot_current:
-            if self.current_data is None:
-                raise ValueError("Current data not available for plotting")
-            channels_to_plot.append('current')
-            channel_labels.append('Current')
-            channel_units.append(self.current_unit)
-        
-        if plot_voltage:
-            if self.voltage_data is None:
-                raise ValueError("Voltage data not available for plotting")
-            channels_to_plot.append('voltage')
-            channel_labels.append('Voltage')
-            channel_units.append(self.voltage_unit)
-        
-        if plot_ttl:
-            if self.ttl_data is None:
-                raise ValueError("TTL data not available for plotting")
-            channels_to_plot.append('ttl')
-            channel_labels.append('TTL')
-            channel_units.append(self.ttl_unit)
-        
-        # Convert marker positions to seconds if needed
-        markers = []
-        for marker in [marker_1, marker_2]:
-            if marker is not None:
-                markers.append(marker)
-            else:
-                markers.append(None)
-        
-        marker_1_s, marker_2_s = markers
-        
-        # Determine what data to plot based on sweep parameter
-        def get_data_for_channel(channel_name):
-            if channel_name == 'current':
-                data = self.current_data
-            elif channel_name == 'voltage':
-                data = self.voltage_data
-            elif channel_name == 'ttl':
-                data = self.ttl_data
-            
-            if self.concatenate_sweeps:
-                return data
-            else:
-                # Handle separate sweeps
-                if sweep is None:
-                    return data[0]  # First sweep
-                elif sweep == 'all':
-                    return data  # All sweeps
-                elif isinstance(sweep, int):
-                    if sweep >= self.num_sweeps:
-                        raise ValueError(f"Sweep {sweep} does not exist. Available sweeps: 0-{self.num_sweeps-1}")
-                    return data[sweep][np.newaxis, :] # Specific sweep
-                elif isinstance(sweep, list or tuple):
-                    idx = range(sweep[0], sweep[1])
-                    return data[idx]
-                else:
-                    raise ValueError("sweep must be None, 'all', or a valid sweep index")
-        
-        # Get time axis
-        time_axis = self.time
-        if time_units in ['ms', 'milliseconds']:
-            time_axis = time_axis * 1000
-        
-        # Determine number of subplots and height ratios
-        num_plots = len(channels_to_plot)
-        
-        if height_ratios is None:
-            if num_plots == 1:
-                height_ratios = None
-            elif num_plots == 2:
-                # Give current channel more space if it's included
-                if has_current:
-                    height_ratios = (3, 1)
-                else:
-                    height_ratios = (1, 1)
-            else:  # num_plots == 3
-                # Give current channel more space if it's included
-                if has_current:
-                    height_ratios = (3, 1, 1)
-                else:
-                    height_ratios = (1, 1, 1)
-        
-        # Create subplots
-        if num_plots == 1:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            axes = [ax]
-        else:
-            fig, axes = plt.subplots(num_plots, 1, figsize=(10, 2 + 2*num_plots), 
-                                    sharex=True, height_ratios=height_ratios)
-            if not isinstance(axes, (list, np.ndarray)):
-                axes = [axes]
-        
-        # Plot each requested channel
-        for i, (channel_name, label, unit) in enumerate(zip(channels_to_plot, channel_labels, channel_units)):
-            ax = axes[i]
-            data_to_plot = get_data_for_channel(channel_name)
-            
-            # Plot the data
-            if not self.concatenate_sweeps:
-                # Plot all sweeps
-                if plot_mean:
-                    # Plot individual sweeps with transparency
-                    for sweep_idx in range(data_to_plot.shape[0]):
-                        ax.plot(time_axis, data_to_plot[sweep_idx], color='gray', alpha=0.3, linewidth=0.5)
-                    # Plot mean in red
-                    mean_data = np.mean(data_to_plot, axis=0)
-                    ax.plot(time_axis, mean_data, color='red', linewidth=1, label='Mean')
-                else:
-                    # Plot all sweeps in black
-                    for sweep_idx in range(data_to_plot.shape[0]):
-                        ax.plot(time_axis, data_to_plot[sweep_idx], color='black', alpha=1, linewidth=0.5)
-            else:
-                # Plot all sweeps in black
-                ax.plot(time_axis, data_to_plot, color='black', alpha=1, linewidth=0.5)
-
-
-            # Set labels and formatting
-            ax.set_ylabel(f'{label} ({unit})')
-            ax.grid(True, alpha=0.3)
-        
-        # Set x-axis label on bottom subplot
-        if time_units in ['ms', 'milliseconds']:
-            axes[-1].set_xlabel('Time (ms)')
-        else:
-            axes[-1].set_xlabel('Time (s)')
-        
-        # Add markers to all subplots
-        for marker, label in [(marker_1_s, 'marker 1'), (marker_2_s, 'marker 2')]:
-            if marker is not None:
-                for ax in axes:
-                    ylims = ax.get_ylim()
-                    ax.vlines(marker, ylims[0]*0.8,ylims[1]*0.8, color='red', linestyle='-', linewidth=0.8)
-                    ax.annotate(label, xy=(marker, ylims[1]), xytext=(marker, ylims[1]*0.9), fontsize=10, color='red', ha='center', va='bottom')
-        plt.tight_layout()
-        
-        # Return appropriate axes
-        if num_plots == 1:
-            return axes[0]
-        else:
-            return tuple(axes)
-
-    def get_step_events(self, threshold: float, channel: str = 'ttl', edge: str = 'rising', 
-                        polarity: str = 'positive', time_units: str = 's', sweep: int = None):
-        '''Extract step event times from any channel data.
-        
-        Parameters
-        ----------
-        threshold: float
-            Threshold value for detecting step events.
-        channel: str, default='ttl'
-            Which channel to analyze ('current', 'voltage', or 'ttl').
-        edge: str, default='rising'
-            Type of edge to detect ('rising', 'falling', or 'both').
-        polarity: str, default='positive'
-            Step polarity to detect ('positive' for steps above threshold, 'negative' for steps below threshold).
-        time_units: str, default='s'
-            Units for returned event times ('s' or 'ms').
-        sweep: int, optional
-            For 2D data (separate sweeps), specify which sweep to analyze.
-            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
-            
-        Returns
-        -------
-        np.ndarray or list of np.ndarray
-            Array of event times in specified units. For 2D data when sweep is None,
-            returns a list with one array per sweep.
-            
-        Raises
-        ------
-        ValueError
-            If no data is available for the specified channel or invalid parameters.
-        '''
-        # Validate parameters
-        if channel not in ['current', 'voltage', 'ttl']:
-            raise ValueError("Channel must be 'current', 'voltage', or 'ttl'")
-            
-        if edge not in ['rising', 'falling', 'both']:
-            raise ValueError("Edge must be 'rising', 'falling', or 'both'")
-        
-        if polarity not in ['positive', 'negative']:
-            raise ValueError("Polarity must be 'positive' or 'negative'")
-        
-        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
-            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
-        
-        # Get the appropriate data
-        if channel == 'current':
-            if self.current_data is None:
-                raise ValueError("No current data available")
-            data = self.current_data
-        elif channel == 'voltage':
-            if self.voltage_data is None:
-                raise ValueError("No voltage data available")
-            data = self.voltage_data
-        else:  # ttl
-            if self.ttl_data is None:
-                raise ValueError("No TTL data available")
-            data = self.ttl_data
-        
-        def find_step_events_in_trace(trace_data):
-            """Helper function to find step events in a 1D trace"""
-            # Apply polarity logic to the threshold comparison
-            if polarity == 'positive':
-                above_threshold = trace_data > threshold
-            else:  # negative polarity
-                above_threshold = trace_data < threshold
-            
-            if edge == 'rising':
-                crossings = np.where(np.diff(above_threshold.astype(int)) == 1)[0]
-            elif edge == 'falling':
-                crossings = np.where(np.diff(above_threshold.astype(int)) == -1)[0]
-            else:  # both
-                crossings = np.where(np.abs(np.diff(above_threshold.astype(int))) == 1)[0]
-            
-            # Convert to times
-            event_times = crossings * self.sampling
-            
-            # Convert to requested units
-            if time_units in ['ms', 'milliseconds']:
-                event_times = event_times * 1000
-            
-            return event_times
-        
-        # Handle different data structures
-        if data.ndim == 1:
-            # 1D data (concatenated sweeps)
-            return find_step_events_in_trace(data)
-        else:
-            # 2D data (separate sweeps)
-            if sweep == 'all':
-                sweep=None
-            if sweep is None:
-                # Analyze all sweeps
-                event_times_list = []
-                for i in range(data.shape[0]):
-                    sweep_events = find_step_events_in_trace(data[i])
-                    event_times_list.append(sweep_events)
-                return event_times_list
-            elif isinstance(sweep, (int, float)):
-                # Analyze specific sweep
-                if sweep >= data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
-                return find_step_events_in_trace(data[sweep])
-
-    def get_event_times(self, threshold: float, polarity: str = 'positive', 
-                        time_units: str = 's', channel: str = 'current', 
-                        min_distance: int = None, prominence: float = None,
-                        sweep: int = None):
-        """
-        Find event times based on peaks above or below a threshold.
-        
-        Parameters
-        ----------
-        threshold : float
-            Threshold value for peak detection. Peaks above this value (positive polarity)
-            or below this value (negative polarity) will be detected.
-        polarity : str, default='positive'
-            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
-        time_units : str, default='s'
-            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
-        channel : str, default='current'
-            Which channel to analyze. Options: 'current', 'voltage'.
-        min_distance : int, optional
-            Minimum number of samples between detected peaks. Helps avoid double-counting
-            closely spaced peaks.
-        prominence : float, optional
-            Required prominence of peaks. Helps filter out small fluctuations.
-        sweep : int, optional
-            For 2D data (separate sweeps), specify which sweep to analyze. 
-            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
-        
-        Returns
-        -------
-        numpy.ndarray or list of numpy.ndarray
-            Event times in specified units. For 2D data when sweep_idx is None,
-            returns a list with one array per sweep.
-        
-        Raises
-        ------
-        ValueError
-            If invalid parameters are provided or required data is not available.
-        ImportError
-            If scipy is not available for peak detection.
-        """
-        try:
-            from scipy.signal import find_peaks
-        except ImportError:
-            raise ImportError("scipy is required for peak detection. Please install scipy.")
-        
-        # Validate parameters
-        if polarity not in ['positive', 'negative']:
-            raise ValueError("polarity must be 'positive' or 'negative'")
-        
-        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
-            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
-        
-        if channel not in ['current', 'voltage']:
-            raise ValueError("channel must be 'current' or 'voltage'")
-        
-        # Get the appropriate data
-        if channel == 'current':
-            if self.current_data is None:
-                raise ValueError("No current data available")
-            data = self.current_data
-        else:  # voltage
-            if self.voltage_data is None:
-                raise ValueError("No voltage data available")
-            data = self.voltage_data
-        
-        def find_events_in_trace(trace_data):
-            """Helper function to find events in a 1D trace"""
-            if polarity == 'positive':
-                # Find peaks above threshold
-                # For positive peaks, we look for peaks in the original data
-                # and then filter by threshold
-                peak_indices, properties = find_peaks(trace_data, 
-                                                    distance=min_distance,
-                                                    prominence=prominence)
-                # Filter peaks that are above threshold
-                above_threshold = trace_data[peak_indices] >= threshold
-                event_indices = peak_indices[above_threshold]
-                
-            else:  # negative polarity
-                # Find peaks below threshold
-                # For negative peaks, we invert the data and find peaks,
-                # then filter by threshold
-                inverted_data = -trace_data
-                peak_indices, properties = find_peaks(inverted_data,
-                                                    distance=min_distance, 
-                                                    prominence=prominence)
-                # Filter peaks that are below threshold (in original data)
-                below_threshold = trace_data[peak_indices] <= threshold
-                event_indices = peak_indices[below_threshold]
-            
-            # Convert indices to times
-            event_times = event_indices * self.sampling
-            
-            # Convert to requested units
-            if time_units in ['ms', 'milliseconds']:
-                event_times = event_times * 1000
-            
-            if len(event_times) == 0:
-                print("WARNING: No events detected, double check your detection settings")
-            return event_times
-        
-        # Handle different data structures
-        if data.ndim == 1:
-            # 1D data (concatenated sweeps)
-            return find_events_in_trace(data)
-        
-        else:
-            # 2D data (separate sweeps)
-            if sweep in ['all', None]:
-                # Analyze all sweeps
-                event_times_list = []
-                for i in range(data.shape[0]):
-                    sweep_events = find_events_in_trace(data[i])
-                    event_times_list.append(sweep_events)
-                return event_times_list
-            elif isinstance(sweep, (int, float)):
-                # Analyze specific sweep
-                if sweep >= data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
-                return find_events_in_trace(data[sweep])
 
     def detect_spikes(self, threshold: float = -20, min_height: float = None, 
                     min_distance: int = None, prominence: float = None,
@@ -1531,124 +2921,130 @@ class Trace():
             if total_spikes > 0:
                 print(f"Overall spike rate: {total_spikes/(self.num_sweeps * self.total_time):.2f} Hz")
 
-    def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
-                            time_units: str = 's', sweep: int = None):
+
+
+    def get_event_times(self, threshold: float, polarity: str = 'positive', 
+                        time_units: str = 's', channel: str = 'current', 
+                        min_distance: int = None, prominence: float = None,
+                        sweep: int = None):
         """
-        Extract measurements from current and voltage data within a specified time window.
+        Find event times based on peaks above or below a threshold.
         
         Parameters
         ----------
-        start_time : float
-            Start time of the measurement window.
-        end_time : float
-            End time of the measurement window.
-        measurement_type : str, default='mean'
-            Type of measurement to extract. Options: 'mean', 'max', 'min', 'peak'.
+        threshold : float
+            Threshold value for peak detection. Peaks above this value (positive polarity)
+            or below this value (negative polarity) will be detected.
+        polarity : str, default='positive'
+            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
         time_units : str, default='s'
-            Time units for start_time and end_time. Options: 's' (seconds), 'ms' (milliseconds).
+            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
+        channel : str, default='current'
+            Which channel to analyze. Options: 'current', 'voltage'.
+        min_distance : int, optional
+            Minimum number of samples between detected peaks. Helps avoid double-counting
+            closely spaced peaks.
+        prominence : float, optional
+            Required prominence of peaks. Helps filter out small fluctuations.
         sweep : int, optional
-            For 2D data, specify which sweep to measure. If None, measurements from all sweeps are returned.
+            For 2D data (separate sweeps), specify which sweep to analyze. 
+            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
         
         Returns
         -------
-        tuple or list of tuples
-            For 1D data or when sweep is specified: (current_measurement, voltage_measurement)
-            For 2D data when sweep is None: list of tuples, one per sweep
-            voltage_measurement is None if no voltage data is available.
+        numpy.ndarray or list of numpy.ndarray
+            Event times in specified units. For 2D data when sweep_idx is None,
+            returns a list with one array per sweep.
         
         Raises
         ------
         ValueError
-            If no current data is available, if time window is invalid, or if units are not recognized.
+            If invalid parameters are provided or required data is not available.
+        ImportError
+            If scipy is not available for peak detection.
         """
-        if self.current_data is None:
-            raise ValueError("No current data available")
+        try:
+            from scipy.signal import find_peaks
+        except ImportError:
+            raise ImportError("scipy is required for peak detection. Please install scipy.")
         
-        # Convert time to seconds if needed
-        if time_units in ['s','seconds']:
-            start_time_s = start_time
-            end_time_s = end_time
-        elif time_units in ['ms', 'milliseconds']:
-            start_time_s = start_time / 1000.0
-            end_time_s = end_time / 1000.0
-        else:
-            raise ValueError(f"Unknown time units: {time_units}. Use 's' for seconds or 'ms' for milliseconds.")
+        # Validate parameters
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("polarity must be 'positive' or 'negative'")
         
-        if start_time_s < 0 or end_time_s > self.total_time:
-            raise ValueError("Time window exceeds data bounds")
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
         
-        if start_time_s >= end_time_s:
-            raise ValueError("Start time must be less than end time")
+        if channel not in ['current', 'voltage']:
+            raise ValueError("channel must be 'current' or 'voltage'")
         
-        # Convert time to sample indices
-        start_idx = int(start_time_s / self.sampling)
-        end_idx = int(end_time_s / self.sampling)
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        else:  # voltage
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
         
-        def calculate_measurement(data_window, measurement_type):
-            """Helper function to calculate measurement based on type"""
-            if measurement_type == 'mean':
-                return np.mean(data_window)
-            elif measurement_type == 'max':
-                return np.max(data_window)
-            elif measurement_type == 'min':
-                return np.min(data_window)
-            elif measurement_type == 'peak':
-                # Find peak (maximum absolute value)
-                abs_data = np.abs(data_window)
-                peak_idx = np.argmax(abs_data)
-                return data_window[peak_idx]
-            else:
-                raise ValueError(f"Unknown measurement type: {measurement_type}")
-        
-        if self.current_data.ndim == 1:
-            # Handle 1D data (concatenated sweeps)
-            current_window = self.current_data[start_idx:end_idx]
-            voltage_window = None
-            if self.voltage_data is not None:
-                voltage_window = self.voltage_data[start_idx:end_idx]
+        def find_events_in_trace(trace_data):
+            """Helper function to find events in a 1D trace"""
+            if polarity == 'positive':
+                # Find peaks above threshold
+                # For positive peaks, we look for peaks in the original data
+                # and then filter by threshold
+                peak_indices, properties = find_peaks(trace_data, 
+                                                    distance=min_distance,
+                                                    prominence=prominence)
+                # Filter peaks that are above threshold
+                above_threshold = trace_data[peak_indices] >= threshold
+                event_indices = peak_indices[above_threshold]
+                
+            else:  # negative polarity
+                # Find peaks below threshold
+                # For negative peaks, we invert the data and find peaks,
+                # then filter by threshold
+                inverted_data = -trace_data
+                peak_indices, properties = find_peaks(inverted_data,
+                                                    distance=min_distance, 
+                                                    prominence=prominence)
+                # Filter peaks that are below threshold (in original data)
+                below_threshold = trace_data[peak_indices] <= threshold
+                event_indices = peak_indices[below_threshold]
             
-            current_measurement = calculate_measurement(current_window, measurement_type)
-            voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None            
+            # Convert indices to times
+            event_times = event_indices * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            if len(event_times) == 0:
+                print("WARNING: No events detected, double check your detection settings")
+            return event_times
+        
+        # Handle different data structures
+        if data.ndim == 1:
+            # 1D data (concatenated sweeps)
+            return find_events_in_trace(data)
+        
         else:
-            if sweep == 'all':
-                sweep = None
-            # Handle 2D data (separate sweeps)
-            if sweep is not None:
-                # Measure specific sweep
-                if sweep >= self.current_data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({self.current_data.shape[0]})")
-                
-                current_window = self.current_data[sweep, start_idx:end_idx]
-                voltage_window = None
-                if self.voltage_data is not None:
-                    voltage_window = self.voltage_data[sweep, start_idx:end_idx]
-                
-                current_measurement = calculate_measurement(current_window, measurement_type)
-                voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None
-                
-                return current_measurement, voltage_measurement
-            else:
-                # Measure all sweeps
-                # measurements = []
-                current_measurement = []
-                voltage_measurement = []
-                for i in range(self.current_data.shape[0]):
-                    current_window = self.current_data[i, start_idx:end_idx]
-                    voltage_window = None
-                    if self.voltage_data is not None:
-                        voltage_window = self.voltage_data[i, start_idx:end_idx]
-                    
-                    sweep_current_measurement = calculate_measurement(current_window, measurement_type)
-                    sweep_voltage_measurement = calculate_measurement(voltage_window, measurement_type) if voltage_window is not None else None
-                    
-                    current_measurement.append(sweep_current_measurement)
-                    voltage_measurement.append(sweep_voltage_measurement)  
-                current_measurement = np.array(current_measurement)
-                voltage_measurement = np.array(voltage_measurement)         
+            # 2D data (separate sweeps)
+            if sweep in ['all', None]:
+                # Analyze all sweeps
+                event_times_list = []
+                for i in range(data.shape[0]):
+                    sweep_events = find_events_in_trace(data[i])
+                    event_times_list.append(sweep_events)
+                return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_events_in_trace(data[sweep])
 
-        return current_measurement, voltage_measurement
-
-    def subtract_baseline(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
+    def subtract_baseline_old(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
         """
         Subtract baseline current and voltage from the data using measurements from a specified time window.
         
@@ -2186,6 +3582,8 @@ class Trace():
                     filename=self.filename, voltage_data=filtered_voltage, voltage_unit=self.voltage_unit,
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
+
+
     def resample(self, sampling_frequency: float=None):
         ''' Resamples the data trace to the given frequency 
         
@@ -2236,7 +3634,6 @@ class Trace():
                     concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
 
 
-
 def combine_traces_across_files(data_files, average_across_sweeps=True, recording_mode="V clamp", filename=None):
     """
     Combine multiple traces from Axon files into a single Trace object.
@@ -2284,9 +3681,341 @@ def combine_traces_across_files(data_files, average_across_sweeps=True, recordin
 
 
 
+import numpy as np
+from scipy.signal import find_peaks
+from scipy.ndimage import gaussian_filter1d
+
+def analyze_spikes(voltage, time=None, sampling_rate=None, min_amplitude=10.0, 
+                  smoothing_sigma=1.0, prominence_factor=2.0):
+    """
+    Analyze action potential spikes using 3rd derivative peak detection.
+    
+    Parameters:
+    -----------
+    voltage : array-like
+        Voltage trace (mV)
+    time : array-like, optional
+        Time points corresponding to voltage samples. If None, uses indices.
+    sampling_rate : float, optional
+        Sampling rate in Hz. If provided and time is None, creates time array.
+    min_amplitude : float, default=10.0
+        Minimum spike amplitude (mV) to be counted as a spike
+    smoothing_sigma : float, default=1.0
+        Standard deviation for Gaussian smoothing before derivative calculation
+    prominence_factor : float, default=2.0
+        Factor for determining peak prominence in 3rd derivative
+    
+    Returns:
+    --------
+    dict with keys:
+        'spike_times': array of spike onset times
+        'threshold_voltages': array of threshold voltages at spike onset
+        'peak_voltages': array of peak voltages
+        'amplitudes': array of spike amplitudes (peak - threshold)
+        'widths_half_max': array of spike widths at half-maximum
+        'spike_indices': array of spike onset indices
+    """
+    
+    # Handle time array
+    if time is None:
+        if sampling_rate is not None:
+            time = np.arange(len(voltage)) / sampling_rate
+        else:
+            time = np.arange(len(voltage))
+    
+    # Convert to numpy arrays
+    voltage = np.array(voltage)
+    time = np.array(time)
+    
+    # Smooth the voltage trace to reduce noise
+    voltage_smooth = gaussian_filter1d(voltage, sigma=smoothing_sigma)
+    
+    # Calculate derivatives
+    dt = np.mean(np.diff(time))
+    dv_dt = np.gradient(voltage_smooth, dt)
+    d2v_dt2 = np.gradient(dv_dt, dt)
+    d3v_dt3 = np.gradient(d2v_dt2, dt)
+    
+    # Find peaks in the 3rd derivative (spike initiation points)
+    # Use adaptive prominence based on the standard deviation of the 3rd derivative
+    prominence_threshold = prominence_factor * np.std(d3v_dt3)
+    
+    # Find positive peaks in 3rd derivative
+    spike_candidates, properties = find_peaks(d3v_dt3, 
+                                            prominence=prominence_threshold,
+                                            distance=int(0.001 / dt))  # Minimum 1ms between spikes
+    
+    # Initialize result lists
+    spike_times = []
+    threshold_voltages = []
+    peak_voltages = []
+    amplitudes = []
+    widths_half_max = []
+    spike_indices = []
+    
+    for spike_idx in spike_candidates:
+        # Find the actual spike peak (maximum voltage after the 3rd derivative peak)
+        # Look in a reasonable window after the spike initiation
+        search_window = int(0.005 / dt)  # 5ms search window
+        search_end = min(spike_idx + search_window, len(voltage))
+        
+        # Find the peak voltage in this window
+        peak_search_region = voltage_smooth[spike_idx:search_end]
+        if len(peak_search_region) == 0:
+            continue
+            
+        peak_offset = np.argmax(peak_search_region)
+        peak_idx = spike_idx + peak_offset
+        peak_voltage = voltage_smooth[peak_idx]
+        
+        # The threshold is the voltage at the 3rd derivative peak
+        threshold_voltage = voltage_smooth[spike_idx]
+        
+        # Calculate amplitude
+        amplitude = peak_voltage - threshold_voltage
+        
+        # Skip if amplitude is below threshold
+        if amplitude < min_amplitude:
+            continue
+        
+        # Calculate width at half-maximum
+        half_max_voltage = threshold_voltage + amplitude / 2
+        
+        # Find where the spike crosses half-max on the rising phase
+        rising_phase = voltage_smooth[spike_idx:peak_idx+1]
+        rising_cross_idx = None
+        for i in range(len(rising_phase)-1):
+            if (rising_phase[i] <= half_max_voltage and 
+                rising_phase[i+1] > half_max_voltage):
+                # Linear interpolation for more precise crossing point
+                frac = (half_max_voltage - rising_phase[i]) / (rising_phase[i+1] - rising_phase[i])
+                rising_cross_idx = spike_idx + i + frac
+                break
+        
+        # Find where the spike crosses half-max on the falling phase
+        # Look for up to 10ms after the peak
+        fall_search_window = int(0.01 / dt)
+        fall_search_end = min(peak_idx + fall_search_window, len(voltage_smooth))
+        falling_phase = voltage_smooth[peak_idx:fall_search_end]
+        
+        falling_cross_idx = None
+        for i in range(len(falling_phase)-1):
+            if (falling_phase[i] > half_max_voltage and 
+                falling_phase[i+1] <= half_max_voltage):
+                # Linear interpolation for more precise crossing point
+                frac = (half_max_voltage - falling_phase[i+1]) / (falling_phase[i] - falling_phase[i+1])
+                falling_cross_idx = peak_idx + i + frac
+                break
+        
+        # Calculate width if both crossings were found
+        if rising_cross_idx is not None and falling_cross_idx is not None:
+            width_samples = falling_cross_idx - rising_cross_idx
+            width_time = width_samples * dt
+        else:
+            width_time = np.nan
+        
+        # Store results
+        spike_times.append(time[spike_idx])
+        threshold_voltages.append(threshold_voltage)
+        peak_voltages.append(peak_voltage)
+        amplitudes.append(amplitude)
+        widths_half_max.append(width_time)
+        spike_indices.append(spike_idx)
+    
+    return {
+        'spike_times': np.array(spike_times),
+        'threshold_voltages': np.array(threshold_voltages),
+        'peak_voltages': np.array(peak_voltages),
+        'amplitudes': np.array(amplitudes),
+        'widths_half_max': np.array(widths_half_max),
+        'spike_indices': np.array(spike_indices)
+    }
+
+
+def plot_spike_analysis(voltage, time, spike_results, show_derivatives=False):
+    """
+    Plot the voltage trace with detected spikes and their properties.
+    
+    Parameters:
+    -----------
+    voltage : array-like
+        Voltage trace (mV)
+    time : array-like
+        Time points (s)
+    spike_results : dict
+        Results from analyze_spikes function
+    show_derivatives : bool, default=False
+        Whether to show derivative traces in subplots
+    """
+    import matplotlib.pyplot as plt
+    
+    if show_derivatives:
+        fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+        
+        # Recalculate derivatives for plotting
+        voltage_smooth = gaussian_filter1d(voltage, sigma=1.0)
+        dt = np.mean(np.diff(time))
+        dv_dt = np.gradient(voltage_smooth, dt)
+        d2v_dt2 = np.gradient(dv_dt, dt)
+        d3v_dt3 = np.gradient(d2v_dt2, dt)
+        
+        # Plot voltage
+        axes[0].plot(time, voltage, 'k-', linewidth=1, label='Voltage')
+        axes[0].plot(spike_results['spike_times'], spike_results['threshold_voltages'], 
+                    'ro', markersize=8, label='Threshold')
+        axes[0].plot(spike_results['spike_times'], spike_results['peak_voltages'], 
+                    'go', markersize=8, label='Peak')
+        axes[0].set_ylabel('Voltage (mV)')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+        
+        # Plot derivatives
+        axes[1].plot(time, dv_dt, 'b-', linewidth=1)
+        axes[1].set_ylabel('1st Derivative')
+        axes[1].grid(True, alpha=0.3)
+        
+        axes[2].plot(time, d2v_dt2, 'r-', linewidth=1)
+        axes[2].set_ylabel('2nd Derivative')
+        axes[2].grid(True, alpha=0.3)
+        
+        axes[3].plot(time, d3v_dt3, 'g-', linewidth=1)
+        axes[3].axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        axes[3].plot(spike_results['spike_times'], 
+                    [d3v_dt3[idx] for idx in spike_results['spike_indices']], 
+                    'ro', markersize=8)
+        axes[3].set_ylabel('3rd Derivative')
+        axes[3].set_xlabel('Time (s)')
+        axes[3].grid(True, alpha=0.3)
+        
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+        
+        # Plot voltage trace
+        ax.plot(time, voltage, 'k-', linewidth=1, label='Voltage')
+        
+        # Mark spike thresholds and peaks
+        ax.plot(spike_results['spike_times'], spike_results['threshold_voltages'], 
+                'ro', markersize=8, label='Threshold')
+        ax.plot(spike_results['spike_times'], spike_results['peak_voltages'], 
+                'go', markersize=8, label='Peak')
+        
+        # Draw half-max lines for width measurement
+        for i, (spike_time, thresh, peak, width) in enumerate(
+            zip(spike_results['spike_times'], spike_results['threshold_voltages'], 
+                spike_results['peak_voltages'], spike_results['widths_half_max'])):
+            
+            if not np.isnan(width):
+                half_max = thresh + (peak - thresh) / 2
+                ax.hlines(half_max, spike_time - width/2, spike_time + width/2, 
+                         colors='orange', linestyles='--', alpha=0.7)
+        
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel('Voltage (mV)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        ax.set_title(f'Detected {len(spike_results["spike_times"])} spikes')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+
+
+
 ###############################
 # Single channel analysis
 ###############################
+
+from scipy.ndimage import median_filter, uniform_filter1d
+def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
+    """
+    Multiple methods for baseline correction in single-channel recordings.
+    These preserve step-like channel events while removing slow baseline drift.
+    
+    Parameters:
+    -----------
+    data : array-like
+        Input signal(s). Can be 1D or 2D array.
+    sampling_freq : float
+        Sampling frequency in Hz
+    method : str
+        Method to use: 'polynomial', 'median_subtraction', 'percentile', 'running_minimum'
+    **kwargs : additional parameters for specific methods
+    
+    Returns:
+    --------
+    corrected_data : ndarray
+        Baseline-corrected signal
+    baseline : ndarray
+        Estimated baseline (for visualization)
+    """
+    
+    if data.ndim == 1:
+        data = data[np.newaxis, :]  # Make 2D for consistent processing
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    corrected_traces = np.zeros_like(data)
+    baselines = np.zeros_like(data)
+    
+    for i in range(data.shape[0]):
+        trace = data[i, :]
+        
+        if method == 'polynomial':
+            # Fit and subtract polynomial trend
+            degree = kwargs.get('degree', 3)
+            x = np.arange(len(trace))
+            coeffs = np.polyfit(x, trace, degree)
+            baseline = np.polyval(coeffs, x)
+            corrected = trace - baseline
+            
+        elif method == 'median_subtraction':
+            # Use median filter to estimate baseline
+            # Window should be much longer than channel events but shorter than drift
+            window_ms = kwargs.get('window_ms', 1000)  # 1 second default
+            window_samples = int(window_ms * sampling_freq / 1000)
+            
+            # Make window odd
+            if window_samples % 2 == 0:
+                window_samples += 1
+            
+            baseline = median_filter(trace, size=window_samples, mode='nearest')
+            corrected = trace - baseline
+            
+        elif method == 'percentile':
+            # Rolling percentile baseline estimation
+            window_ms = kwargs.get('window_ms', 500)
+            percentile = kwargs.get('percentile', 10)  # Use 10th percentile
+            window_samples = int(window_ms * sampling_freq / 1000)
+            
+            baseline = rolling_percentile(trace, window_samples, percentile)
+            corrected = trace - baseline
+            
+        elif method == 'running_minimum':
+            # Running minimum with smoothing
+            window_ms = kwargs.get('window_ms', 200)
+            smooth_ms = kwargs.get('smooth_ms', 50)
+            window_samples = int(window_ms * sampling_freq / 1000)
+            smooth_samples = int(smooth_ms * sampling_freq / 1000)
+            
+            # Running minimum
+            baseline = running_minimum(trace, window_samples)
+            # Smooth the baseline
+            baseline = uniform_filter1d(baseline, smooth_samples)
+            corrected = trace - baseline
+            
+        else:
+            raise ValueError(f"Unknown method: {method}")
+        
+        corrected_traces[i, :] = corrected
+        baselines[i, :] = baseline
+    
+    if squeeze_output:
+        return corrected_traces[0], baselines[0]
+    else:
+        return corrected_traces, baselines
+
 
 def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
                                  removal_method='gaussian_subtraction', removal_factor=1.0, hist_scale_factor=40):
@@ -3357,6 +5086,7 @@ def print_p_open_results(p_estimate, residuals, P_obs, n):
 
 
 
+
 ###############################
 # Data processing functions
 ###############################
@@ -3423,6 +5153,568 @@ def update_plot_defaults():
                     'legend.handletextpad': 0.1,
                     'svg.fonttype': 'none',
                     'text.usetex': False})
+
+
+def plot_spike_raster(spike_data, sweep_duration=None, time_units='ms', 
+                      marker_height=0.8, marker_width=1.0, figsize=(10, 6),
+                      title=None, xlabel=None, ylabel='Sweep', 
+                      color='black', alpha=1.0, ax=None):
+    """
+    Create a raster plot showing spike times as vertical lines.
+    
+    Parameters
+    ----------
+    spike_data : dict or list of dict
+        Spike analysis results from analyze_action_potentials with return_dict=True.
+        - Single sweep: dict with 'spike_times' key
+        - Multiple sweeps: list of dicts, each with 'spike_times' key
+    sweep_duration : float, optional
+        Duration of each sweep in time_units. If None, automatically determined from data.
+    time_units : str, default='ms'
+        Time units for x-axis ('ms' or 's').
+    marker_height : float, default=0.8
+        Height of spike markers as fraction of row height (0-1).
+    marker_width : float, default=1.0
+        Width of spike markers in points.
+    figsize : tuple, default=(10, 6)
+        Figure size (width, height) in inches.
+    title : str, optional
+        Plot title. If None, uses default title.
+    xlabel : str, optional
+        X-axis label. If None, uses default based on time_units.
+    ylabel : str, default='Sweep'
+        Y-axis label.
+    color : str or array-like, default='black'
+        Color for spike markers. Can be single color or array of colors per sweep.
+    alpha : float, default=1.0
+        Transparency of spike markers (0-1).
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to plot on. If None, creates new figure.
+        
+    Returns
+    -------
+    fig, ax : matplotlib figure and axes
+        The figure and axes objects containing the raster plot.
+    """
+    
+    # Handle single sweep vs multiple sweeps
+    if isinstance(spike_data, dict):
+        # Single sweep - convert to list for uniform handling
+        spike_data_list = [spike_data]
+    else:
+        spike_data_list = spike_data
+    
+    n_sweeps = len(spike_data_list)
+    
+    # Create figure if ax not provided
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.get_figure()
+    
+    # Plot spikes for each sweep
+    for sweep_idx, sweep_data in enumerate(spike_data_list):
+        if 'spike_times' not in sweep_data:
+            print(f"Warning: No 'spike_times' key found in sweep {sweep_idx}")
+            continue
+            
+        spike_times = sweep_data['spike_times']
+        
+        if len(spike_times) > 0:
+            # Calculate y-positions for this sweep
+            # Sweeps are numbered from bottom to top (0 at bottom)
+            y_center = sweep_idx
+            y_bottom = y_center - (marker_height / 2)
+            y_top = y_center + (marker_height / 2)
+            
+            # Plot vertical lines for each spike
+            for spike_time in spike_times:
+                ax.vlines(spike_time, y_bottom, y_top, 
+                         colors=color if isinstance(color, str) else color[sweep_idx],
+                         linewidth=marker_width, alpha=alpha)
+    
+    # Set axis limits
+    if sweep_duration is not None:
+        ax.set_xlim(0, sweep_duration)
+    else:
+        # Determine from data
+        all_spike_times = []
+        for sweep_data in spike_data_list:
+            if 'spike_times' in sweep_data and len(sweep_data['spike_times']) > 0:
+                all_spike_times.extend(sweep_data['spike_times'])
+        
+        if all_spike_times:
+            max_time = max(all_spike_times)
+            # Add 5% padding
+            ax.set_xlim(0, max_time * 1.05)
+        else:
+            # No spikes found, use default
+            ax.set_xlim(0, 1000 if time_units == 'ms' else 1)
+    
+    ax.set_ylim(-0.5, n_sweeps - 0.5)
+    
+    # Set labels
+    if xlabel is None:
+        xlabel = f'Time ({time_units})'
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    
+    if title is None:
+        title = f'Spike Raster Plot ({n_sweeps} sweep{"s" if n_sweeps > 1 else ""})'
+    ax.set_title(title)
+    
+    # Set y-ticks to show sweep numbers
+    if n_sweeps > 1:
+        ax.set_yticks(range(n_sweeps))
+        ax.set_yticklabels(range(1, n_sweeps + 1))  # Label sweeps 1, 2, 3, etc.
+    else:
+        ax.set_yticks([0])
+        ax.set_yticklabels(['1'])
+    
+    # Add grid for better readability
+    ax.grid(True, axis='x', alpha=0.3)
+    
+    # Add spike count information
+    total_spikes = sum(len(sd.get('spike_times', [])) for sd in spike_data_list)
+    info_text = f'Total spikes: {total_spikes}'
+    if n_sweeps > 1:
+        spikes_per_sweep = [len(sd.get('spike_times', [])) for sd in spike_data_list]
+        mean_spikes = np.mean(spikes_per_sweep)
+    
+    plt.tight_layout()
+    
+    return fig, ax
+
+def plot_spike_raster_from_trace(trace, min_spike_amplitude=5.0, max_width=10.0, 
+                                min_ISI=1.0, headstage=0, **plot_kwargs):
+    """
+    Convenience function to analyze spikes and create raster plot from a Trace object.
+    
+    Parameters
+    ----------
+    trace : Trace
+        Trace object containing voltage data to analyze.
+    min_spike_amplitude : float, default=5.0
+        Minimum spike amplitude for analyze_action_potentials.
+    max_width : float, default=10.0
+        Maximum spike width for analyze_action_potentials.
+    min_ISI : float, default=1.0
+        Minimum inter-spike interval for analyze_action_potentials.
+    headstage : int, default=0
+        Which headstage to analyze.
+    **plot_kwargs : dict
+        Additional keyword arguments passed to plot_spike_raster.
+        
+    Returns
+    -------
+    fig, ax : matplotlib figure and axes
+        The figure and axes objects containing the raster plot.
+    """
+    # Analyze spikes
+    spike_data = trace.analyze_action_potentials(
+        min_spike_amplitude=min_spike_amplitude,
+        max_width=max_width,
+        min_ISI=min_ISI,
+        headstage=headstage,
+        return_dict=True
+    )
+    
+    # Determine sweep duration if not provided
+    if 'sweep_duration' not in plot_kwargs and trace.total_time_ms is not None:
+        plot_kwargs['sweep_duration'] = trace.total_time_ms
+    
+    # Create raster plot
+    return plot_spike_raster(spike_data, **plot_kwargs)
+
+def get_spike_counts(spike_data, return_stats=False):
+    """
+    Extract spike counts for each sweep from spike analysis results.
+    
+    Parameters
+    ----------
+    spike_data : dict or list of dict
+        Spike analysis results from analyze_action_potentials with return_dict=True.
+        - Single sweep: dict with 'spike_times' key
+        - Multiple sweeps: list of dicts, each with 'spike_times' key
+    return_stats : bool, default=False
+        If True, also returns statistical summary (mean, std, min, max).
+        
+    Returns
+    -------
+    spike_counts : np.ndarray or int
+        - For single sweep: int with spike count
+        - For multiple sweeps: array of spike counts for each sweep
+    stats : dict (only if return_stats=True)
+        Dictionary containing:
+        - 'mean': mean spike count
+        - 'std': standard deviation
+        - 'min': minimum spike count
+        - 'max': maximum spike count
+        - 'total': total spike count across all sweeps
+        - 'n_sweeps': number of sweeps
+    """
+    import numpy as np
+    
+    # Handle single sweep vs multiple sweeps
+    if isinstance(spike_data, dict):
+        # Single sweep
+        spike_count = len(spike_data.get('spike_times', []))
+        
+        if return_stats:
+            stats = {
+                'mean': float(spike_count),
+                'std': 0.0,
+                'min': spike_count,
+                'max': spike_count,
+                'total': spike_count,
+                'n_sweeps': 1
+            }
+            return spike_count, stats
+        else:
+            return spike_count
+    
+    else:
+        # Multiple sweeps
+        spike_counts = np.array([len(sweep.get('spike_times', [])) for sweep in spike_data])
+        
+        if return_stats:
+            stats = {
+                'mean': np.mean(spike_counts),
+                'std': np.std(spike_counts),
+                'min': np.min(spike_counts),
+                'max': np.max(spike_counts),
+                'total': np.sum(spike_counts),
+                'n_sweeps': len(spike_counts)
+            }
+            return spike_counts, stats
+        else:
+            return spike_counts
+
+
+def plot_spike_histograms(spike_data, bins='auto', figsize=(12, 4), 
+                         colors=None, alpha=0.7, density=False,
+                         show_stats=True, title_prefix='', 
+                         voltage_unit='mV', time_unit='ms'):
+    """
+    Plot histograms of spike properties: peak voltages, amplitudes, and widths.
+    
+    Parameters
+    ----------
+    spike_data : dict or list of dict
+        Spike analysis results from analyze_action_potentials with return_dict=True.
+        - Single sweep: dict with spike property keys
+        - Multiple sweeps: list of dicts
+    bins : int, str, or array-like, default='auto'
+        Number of bins or method for determining bins (passed to np.histogram).
+        Options: 'auto', 'sturges', 'fd', 'scott', 'rice', 'sqrt', or integer.
+    figsize : tuple, default=(12, 4)
+        Figure size (width, height) in inches.
+    colors : list of str, optional
+        Colors for the three histograms [peak_voltages, amplitudes, widths].
+        If None, uses default colors.
+    alpha : float, default=0.7
+        Transparency of histogram bars.
+    density : bool, default=False
+        If True, plot probability density instead of counts.
+    show_stats : bool, default=True
+        If True, show mean±std on each plot.
+    title_prefix : str, default=''
+        Prefix to add to subplot titles.
+    voltage_unit : str, default='mV'
+        Unit for voltage measurements.
+    time_unit : str, default='ms'
+        Unit for time measurements (width).
+        
+    Returns
+    -------
+    fig, axes : matplotlib figure and array of axes
+        Figure and axes objects containing the histograms.
+    stats : dict
+        Dictionary containing statistics for each property:
+        - 'peak_voltages': {'mean', 'std', 'min', 'max', 'n'}
+        - 'spike_amplitudes': {'mean', 'std', 'min', 'max', 'n'}
+        - 'spike_widths': {'mean', 'std', 'min', 'max', 'n'}
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Default colors if not provided
+    if colors is None:
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # blue, orange, green
+    
+    # Collect all data across sweeps
+    all_peak_voltages = []
+    all_amplitudes = []
+    all_widths = []
+    
+    # Handle single sweep vs multiple sweeps
+    if isinstance(spike_data, dict):
+        spike_data_list = [spike_data]
+    else:
+        spike_data_list = spike_data
+    
+    # Gather all spike properties
+    for sweep_data in spike_data_list:
+        if 'peak_voltages' in sweep_data:
+            all_peak_voltages.extend(sweep_data['peak_voltages'])
+        if 'spike_amplitudes' in sweep_data:
+            all_amplitudes.extend(sweep_data['spike_amplitudes'])
+        if 'spike_widths' in sweep_data:
+            all_widths.extend(sweep_data['spike_widths'])
+    
+    # Convert to arrays
+    all_peak_voltages = np.array(all_peak_voltages)
+    all_amplitudes = np.array(all_amplitudes)
+    all_widths = np.array(all_widths)
+    
+    # Calculate statistics
+    stats = {}
+    
+    def calc_stats(data, name):
+        if len(data) > 0:
+            return {
+                'mean': np.mean(data),
+                'std': np.std(data),
+                'min': np.min(data),
+                'max': np.max(data),
+                'n': len(data)
+            }
+        else:
+            return {
+                'mean': np.nan,
+                'std': np.nan,
+                'min': np.nan,
+                'max': np.nan,
+                'n': 0
+            }
+    
+    stats['peak_voltages'] = calc_stats(all_peak_voltages, 'peak_voltages')
+    stats['spike_amplitudes'] = calc_stats(all_amplitudes, 'spike_amplitudes')
+    stats['spike_widths'] = calc_stats(all_widths, 'spike_widths')
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # Plot histograms
+    properties = [
+        (all_peak_voltages, 'Peak Voltages', voltage_unit, axes[0], colors[0]),
+        (all_amplitudes, 'Spike Amplitudes', voltage_unit, axes[1], colors[1]),
+        (all_widths, 'Spike Widths', time_unit, axes[2], colors[2])
+    ]
+    
+    for data, label, unit, ax, color in properties:
+        if len(data) > 0:
+            # Create histogram
+            counts, bin_edges, patches = ax.hist(data, bins=bins, density=density, 
+                                                color=color, alpha=alpha, 
+                                                edgecolor='black', linewidth=0.5)
+            
+            # Add vertical line for mean
+            mean_val = np.mean(data)
+            ax.axvline(mean_val, color='red', linestyle='--', linewidth=2, alpha=0.8)
+            
+            # Add statistics text if requested
+            if show_stats:
+                stats_text = f'μ = {mean_val:.1f} ± {np.std(data):.1f}\nn = {len(data)}'
+                ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+                       verticalalignment='top', horizontalalignment='right',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Labels
+            ax.set_xlabel(f'{label} ({unit})')
+            ylabel = 'Probability Density' if density else 'Count'
+            ax.set_ylabel(ylabel)
+            ax.set_title(f'{title_prefix}{label}' if title_prefix else label)
+            
+            # Grid
+            ax.grid(True, alpha=0.3)
+            
+        else:
+            # No data for this property
+            ax.text(0.5, 0.5, 'No spikes detected', transform=ax.transAxes,
+                   horizontalalignment='center', verticalalignment='center',
+                   fontsize=12, color='gray')
+            ax.set_xlabel(f'{label} ({unit})')
+            ax.set_ylabel('Count')
+            ax.set_title(f'{title_prefix}{label}' if title_prefix else label)
+    
+    plt.tight_layout()
+    
+    # Print summary statistics
+    print("\nSpike Property Summary:")
+    print("-" * 50)
+    total_spikes = stats['peak_voltages']['n']
+    print(f"Total spikes analyzed: {total_spikes}")
+    
+    if total_spikes > 0:
+        print(f"\nPeak Voltages ({voltage_unit}):")
+        print(f"  Mean ± SD: {stats['peak_voltages']['mean']:.1f} ± {stats['peak_voltages']['std']:.1f}")
+        print(f"  Range: [{stats['peak_voltages']['min']:.1f}, {stats['peak_voltages']['max']:.1f}]")
+        
+        print(f"\nSpike Amplitudes ({voltage_unit}):")
+        print(f"  Mean ± SD: {stats['spike_amplitudes']['mean']:.1f} ± {stats['spike_amplitudes']['std']:.1f}")
+        print(f"  Range: [{stats['spike_amplitudes']['min']:.1f}, {stats['spike_amplitudes']['max']:.1f}]")
+        
+        print(f"\nSpike Widths ({time_unit}):")
+        print(f"  Mean ± SD: {stats['spike_widths']['mean']:.2f} ± {stats['spike_widths']['std']:.2f}")
+        print(f"  Range: [{stats['spike_widths']['min']:.2f}, {stats['spike_widths']['max']:.2f}]")
+    
+    return fig, axes, stats
+
+def plot_spike_property_distributions(spike_data, property='all', plot_type='violin',
+                                    figsize=(8, 6), show_points=True,
+                                    voltage_unit='mV', time_unit='ms'):
+    """
+    Create violin or box plots comparing spike properties across sweeps.
+    
+    Parameters
+    ----------
+    spike_data : list of dict
+        Spike analysis results from multiple sweeps.
+    property : str, default='all'
+        Which property to plot: 'peak_voltages', 'spike_amplitudes', 'spike_widths', or 'all'.
+    plot_type : str, default='violin'
+        Type of plot: 'violin', 'box', or 'both'.
+    figsize : tuple, default=(8, 6)
+        Figure size (width, height) in inches.
+    show_points : bool, default=True
+        If True, overlay individual data points.
+    voltage_unit : str, default='mV'
+        Unit for voltage measurements.
+    time_unit : str, default='ms'
+        Unit for time measurements.
+        
+    Returns
+    -------
+    fig, ax : matplotlib figure and axes
+        Figure and axes objects containing the plot.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    if not isinstance(spike_data, list):
+        raise ValueError("This function requires data from multiple sweeps")
+    
+    # Prepare data for each sweep
+    sweep_data = {}
+    properties_to_plot = []
+    units = {}
+    
+    if property == 'all' or property == 'peak_voltages':
+        sweep_data['Peak Voltages'] = [sweep.get('peak_voltages', []) for sweep in spike_data]
+        properties_to_plot.append('Peak Voltages')
+        units['Peak Voltages'] = voltage_unit
+        
+    if property == 'all' or property == 'spike_amplitudes':
+        sweep_data['Spike Amplitudes'] = [sweep.get('spike_amplitudes', []) for sweep in spike_data]
+        properties_to_plot.append('Spike Amplitudes')
+        units['Spike Amplitudes'] = voltage_unit
+        
+    if property == 'all' or property == 'spike_widths':
+        sweep_data['Spike Widths'] = [sweep.get('spike_widths', []) for sweep in spike_data]
+        properties_to_plot.append('Spike Widths')
+        units['Spike Widths'] = time_unit
+    
+    # Create figure
+    if property == 'all':
+        fig, axes = plt.subplots(1, 3, figsize=(figsize[0]*1.5, figsize[1]))
+        axes = axes.flatten()
+    else:
+        fig, ax = plt.subplots(figsize=figsize)
+        axes = [ax]
+    
+    # Plot each property
+    for idx, prop in enumerate(properties_to_plot):
+        ax = axes[idx]
+        data_list = sweep_data[prop]
+        
+        # Filter out empty sweeps
+        filtered_data = [d for d in data_list if len(d) > 0]
+        sweep_indices = [i+1 for i, d in enumerate(data_list) if len(d) > 0]
+        
+        if len(filtered_data) == 0:
+            ax.text(0.5, 0.5, f'No {prop.lower()} detected', 
+                   transform=ax.transAxes, ha='center', va='center',
+                   fontsize=12, color='gray')
+            ax.set_xlabel('Sweep')
+            ax.set_ylabel(f'{prop} ({units[prop]})')
+            ax.set_title(prop)
+            continue
+        
+        # Create plot
+        positions = range(len(filtered_data))
+        
+        if plot_type == 'violin' or plot_type == 'both':
+            parts = ax.violinplot(filtered_data, positions=positions, 
+                                 widths=0.7, showmeans=True, showextrema=True)
+            for pc in parts['bodies']:
+                pc.set_alpha(0.7)
+        
+        if plot_type == 'box' or plot_type == 'both':
+            bp = ax.boxplot(filtered_data, positions=positions, 
+                           widths=0.3 if plot_type == 'both' else 0.7,
+                           patch_artist=True, alpha=0.5 if plot_type == 'both' else 0.7)
+        
+        # Overlay individual points if requested
+        if show_points:
+            for pos, data in enumerate(filtered_data):
+                # Add small random jitter for visibility
+                jitter = np.random.normal(0, 0.04, size=len(data))
+                ax.scatter(pos + jitter, data, alpha=0.3, s=10, color='black')
+        
+        # Labels and formatting
+        ax.set_xticks(positions)
+        ax.set_xticklabels(sweep_indices)
+        ax.set_xlabel('Sweep')
+        ax.set_ylabel(f'{prop} ({units[prop]})')
+        ax.set_title(prop)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.tight_layout()
+    return fig, axes[0] if len(axes) == 1 else axes
+
+def analyze_and_plot_spikes(trace, min_spike_amplitude=5.0, max_width=10.0, 
+                           min_ISI=1.0, headstage=0, **kwargs):
+    """
+    Convenience function to analyze spikes and create histogram plots.
+    
+    Parameters
+    ----------
+    trace : Trace
+        Trace object containing voltage data.
+    min_spike_amplitude : float, default=5.0
+        Minimum spike amplitude for analysis.
+    max_width : float, default=10.0
+        Maximum spike width for analysis.
+    min_ISI : float, default=1.0
+        Minimum inter-spike interval for analysis.
+    headstage : int, default=0
+        Which headstage to analyze.
+    **kwargs : dict
+        Additional arguments passed to plot_spike_histograms.
+        
+    Returns
+    -------
+    spike_data : dict or list of dict
+        Spike analysis results.
+    fig, axes : matplotlib figure and axes
+        Histogram plot objects.
+    stats : dict
+        Statistics for spike properties.
+    """
+    # Analyze spikes
+    spike_data = trace.analyze_action_potentials(
+        min_spike_amplitude=min_spike_amplitude,
+        max_width=max_width,
+        min_ISI=min_ISI,
+        headstage=headstage,
+        return_dict=True
+    )
+    
+    # Plot histograms
+    fig, axes, stats = plot_spike_histograms(spike_data, **kwargs)
+    
+    return spike_data, fig, axes, stats
 
 
 def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
