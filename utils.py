@@ -2,7 +2,7 @@
 import numpy as np
 from scipy import signal
 from scipy.optimize import curve_fit
-# from scipy.ndimage import maximum_filter1d
+from scipy.ndimage import gaussian_filter1d, maximum_filter1d
 from scipy.special import comb # for binomial coefficients
 
 import matplotlib.pyplot as plt
@@ -1336,7 +1336,7 @@ class Trace():
         return cropped_trace
 
     def analyze_action_potentials(self, min_spike_amplitude=5.0, max_width=10.0, min_ISI=1.0, 
-                                headstage=0, sweep=None, return_dict=False):
+                                headstage=0, sweep=None, return_dict=False, time_units='ms'):
         """
         Analyze action potentials/spikes in voltage data using 3rd derivative peak detection.
         
@@ -1386,8 +1386,12 @@ class Trace():
             voltage = self.voltage_data
         
         # Convert parameters to samples
-        min_ISI_samples = int(min_ISI * 0.001 / self.sampling)  # Convert ms to samples
-        max_width_samples = int(max_width * 0.001 / self.sampling)  # Convert ms to samples
+        if time_units == 's':
+            min_ISI_samples = int(min_ISI / self.sampling)  # Convert ms to samples
+            max_width_samples = int(max_width / self.sampling)  # Convert ms to samples
+        elif time_units == 'ms':
+            min_ISI_samples = int(min_ISI * 0.001 / self.sampling)  # Convert ms to samples
+            max_width_samples = int(max_width * 0.001 / self.sampling)  # Convert ms to samples
         
         def analyze_single_trace(v_data):
             """Analyze spikes in a single voltage trace."""
@@ -1397,8 +1401,7 @@ class Trace():
             d3v_dt3 = np.gradient(d2v_dt2)
             
             # Find peaks in 3rd derivative (spike times)
-            from scipy.signal import find_peaks
-            spike_indices, _ = find_peaks(d3v_dt3, distance=min_ISI_samples)
+            spike_indices, _ = signal.find_peaks(d3v_dt3, distance=min_ISI_samples)
             
             if len(spike_indices) == 0:
                 # No spikes found
@@ -1442,7 +1445,11 @@ class Trace():
                 if len(below_half) > 0:
                     # Width is from threshold to first point below half-max after peak
                     width_samples = peak_idx - spike_idx + below_half[0]
-                    width_ms = width_samples * self.sampling * 1000
+                    if time_units == 'ms':
+                        width_ms = width_samples * self.sampling * 1000
+                    elif time_units == 's':
+                        width_ms = width_samples * self.sampling
+
                     
                     # Skip if width is too large
                     if width_ms > max_width:
@@ -1460,7 +1467,10 @@ class Trace():
             
             # Convert to arrays
             if len(valid_spikes) > 0:
-                spike_times = np.array(valid_spikes) * self.sampling * 1000  # Convert to ms
+                if time_units == 'ms':
+                    spike_times = np.array(valid_spikes) * self.sampling * 1000  # Convert to ms
+                elif time_units == 's':
+                    spike_times = np.array(valid_spikes) * self.sampling
                 threshold_voltages = np.array(threshold_voltages)
                 peak_voltages = np.array(peak_voltages)
                 spike_amplitudes = np.array(spike_amplitudes)
@@ -2277,8 +2287,8 @@ class Trace():
 
     @classmethod
     def from_wavesurfer_h5_file(cls, filename: str, current_scaling: float = 1.0, 
-                            voltage_scaling: float = 1.0, current_unit: str = 'nA', 
-                            voltage_unit: str = 'V', concatenate_sweeps: bool = True,
+                            voltage_scaling: float = 1.0, current_unit: str = 'pA', 
+                            voltage_unit: str = 'mV', concatenate_sweeps: bool = True,
                             load_voltage: bool = True):
         """
         Loads data from a Wavesurfer-style HDF5 file.
@@ -3238,7 +3248,85 @@ class Trace():
         
         return None
 
-    def detrend(self, detrend_type: str='linear', num_segments: int=0):
+    def detrend(self, detrend_type: str='linear', num_segments: int=0, return_trend: bool=False):
+        ''' Detrend the data. 
+
+        Parameters
+        ----------
+        detrend_type: str, default='linear'
+            Type of detrending. Options: 'linear', 'constant'
+        num_segments: int, default=0
+            Number of segments for detrending. Increase in case of non-linear trends in the data.
+        return_trend: bool, default=False
+            If True, also return the trend values for plotting/analysis
+
+        Returns
+        -------
+        Trace or tuple
+            If return_trend=False: The detrended Trace object.
+            If return_trend=True: Tuple of (detrended_trace, trend_dict) where trend_dict 
+            contains 'current_trend' and optionally 'voltage_trend' arrays.
+        '''
+        if self.current_data is None:
+            raise ValueError("No data to detrend")
+        
+        # Helper function to calculate trend from original and detrended data
+        def get_trend(original, detrended):
+            return original - detrended
+        
+        if self.concatenate_sweeps or self.current_data.ndim == 1:
+            # Original behavior for concatenated data
+            num_data = self.current_data.shape[0]
+            breaks = np.arange(num_data/num_segments, num_data, num_data/num_segments, dtype=np.int64) if num_segments > 1 else 0
+            detrended = signal.detrend(self.current_data, bp=breaks, type=detrend_type)
+            
+            # Calculate trend if requested
+            current_trend = get_trend(self.current_data, detrended) if return_trend else None
+            
+            # Also detrend voltage data if available
+            voltage_detrended = None
+            voltage_trend = None
+            if self.voltage_data is not None:
+                voltage_detrended = signal.detrend(self.voltage_data, bp=breaks, type=detrend_type)
+                voltage_trend = get_trend(self.voltage_data, voltage_detrended) if return_trend else None
+        else:
+            # Detrend each sweep individually
+            detrended = np.zeros_like(self.current_data)
+            current_trend = np.zeros_like(self.current_data) if return_trend else None
+            
+            for i in range(self.current_data.shape[0]):
+                num_data = self.current_data.shape[1]
+                breaks = np.arange(num_data/num_segments, num_data, num_data/num_segments, dtype=np.int64) if num_segments > 1 else 0
+                detrended[i] = signal.detrend(self.current_data[i], bp=breaks, type=detrend_type)
+                
+                if return_trend:
+                    current_trend[i] = get_trend(self.current_data[i], detrended[i])
+            
+            # Also detrend voltage data if available
+            voltage_detrended = None
+            voltage_trend = None
+            if self.voltage_data is not None:
+                voltage_detrended = np.zeros_like(self.voltage_data)
+                voltage_trend = np.zeros_like(self.voltage_data) if return_trend else None
+                
+                for i in range(self.voltage_data.shape[0]):
+                    voltage_detrended[i] = signal.detrend(self.voltage_data[i], bp=breaks, type=detrend_type)
+                    if return_trend:
+                        voltage_trend[i] = get_trend(self.voltage_data[i], voltage_detrended[i])
+
+        detrended_trace = Trace(detrended, self.sampling, current_unit=self.current_unit, filename=self.filename,
+                            voltage_data=voltage_detrended, voltage_unit=self.voltage_unit, 
+                            concatenate_sweeps=getattr(self, 'concatenate_sweeps', True))
+        
+        if return_trend:
+            trend_dict = {'current_trend': current_trend}
+            if voltage_trend is not None:
+                trend_dict['voltage_trend'] = voltage_trend
+            return detrended_trace, trend_dict
+        else:
+            return detrended_trace
+
+    def detrend_old(self, detrend_type: str='linear', num_segments: int=0):
         ''' Detrend the data. 
 
         Parameters
@@ -3921,9 +4009,8 @@ def plot_spike_analysis(voltage, time, spike_results, show_derivatives=False):
 
 
 
-
 ###############################
-# Single channel analysis
+# Signal Processing
 ###############################
 
 from scipy.ndimage import median_filter, uniform_filter1d
@@ -4016,6 +4103,84 @@ def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
     else:
         return corrected_traces, baselines
 
+def rolling_percentile(data, window, percentile):
+    """Rolling percentile calculation"""
+    result = np.zeros_like(data)
+    half_window = window // 2
+    
+    for i in range(len(data)):
+        start = max(0, i - half_window)
+        end = min(len(data), i + half_window + 1)
+        result[i] = np.percentile(data[start:end], percentile)
+    
+    return result
+
+def running_minimum(data, window):
+    """Running minimum calculation"""
+    result = np.zeros_like(data)
+    half_window = window // 2
+    
+    for i in range(len(data)):
+        start = max(0, i - half_window)
+        end = min(len(data), i + half_window + 1)
+        result[i] = np.min(data[start:end])
+    
+    return result
+
+def adaptive_baseline_correction(data, sampling_freq, closed_level_percentile=20):
+    """
+    Adaptive method: estimate closed level and subtract slowly-varying component
+    Works well when you have clear closed and open levels
+    """
+    if data.ndim == 1:
+        data = data[np.newaxis, :]
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    corrected_traces = np.zeros_like(data)
+    
+    for i in range(data.shape[0]):
+        trace = data[i, :]
+        
+        # Estimate closed level (assuming most time spent closed)
+        closed_level = np.percentile(trace, closed_level_percentile)
+        
+        # Find points likely to be at closed level
+        threshold = closed_level + 0.1 * np.std(trace)  # Small tolerance
+        closed_points = trace <= threshold
+        
+        # If we have enough closed points, interpolate baseline
+        if np.sum(closed_points) > len(trace) * 0.1:  # At least 10% closed points
+            x = np.arange(len(trace))
+            closed_x = x[closed_points]
+            closed_y = trace[closed_points]
+            
+            # Interpolate baseline from closed points
+            baseline = np.interp(x, closed_x, closed_y)
+            
+            # Smooth the baseline
+            baseline = uniform_filter1d(baseline, int(0.1 * sampling_freq))  # 100ms smoothing
+            
+            corrected = trace - baseline
+        else:
+            # Fallback to polynomial detrending
+            x = np.arange(len(trace))
+            coeffs = np.polyfit(x, trace, 2)
+            baseline = np.polyval(coeffs, x)
+            corrected = trace - baseline
+        
+        corrected_traces[i, :] = corrected
+    
+    if squeeze_output:
+        return corrected_traces[0]
+    else:
+        return corrected_traces
+
+
+###############################
+# Single channel analysis
+###############################
 
 def detect_levels_from_histogram(traces, n_levels, plot_result=True, bins=200, mean_guesses=None, 
                                  removal_method='gaussian_subtraction', removal_factor=1.0, hist_scale_factor=40):
@@ -5087,6 +5252,8 @@ def print_p_open_results(p_estimate, residuals, P_obs, n):
 
 
 
+
+
 ###############################
 # Data processing functions
 ###############################
@@ -5390,6 +5557,34 @@ def get_spike_counts(spike_data, return_stats=False):
         else:
             return spike_counts
 
+def compute_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
+    """
+    Converts spike times to a continuous firing rate trace using Gaussian convolution.
+
+    Parameters:
+    - spike_times (np.ndarray): 1D array of spike times in seconds.
+    - duration (float): Total duration of the recording in seconds.
+    - sampling_rate (float): Desired output sampling rate in Hz (samples per second).
+    - sigma_ms (float): Width of the Gaussian kernel in milliseconds (default=50 ms).
+
+    Returns:
+    - time (np.ndarray): Time axis in seconds.
+    - firing_rate (np.ndarray): Smoothed firing rate in Hz.
+    """
+    n_samples = int(duration * sampling_rate)
+    time = np.linspace(0, duration, n_samples, endpoint=False)
+
+    # Bin spikes
+    spike_train = np.zeros(n_samples)
+    spike_indices = (spike_times * sampling_rate).astype(int)
+    spike_indices = spike_indices[spike_indices < n_samples]
+    np.add.at(spike_train, spike_indices, 1)
+
+    # Convolve with Gaussian
+    sigma_samples = sigma_ms / 1000 * sampling_rate
+    firing_rate = gaussian_filter1d(spike_train, sigma=sigma_samples) * sampling_rate
+
+    return time, firing_rate
 
 def plot_spike_histograms(spike_data, bins='auto', figsize=(12, 4), 
                          colors=None, alpha=0.7, density=False,
