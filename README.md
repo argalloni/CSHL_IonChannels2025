@@ -126,7 +126,6 @@ This is not required for the installation, but it is useful to know a few basic 
     - e.g. `cd CSHL_IonChannels/data`
 - **ls**: list files in the current directory
     - e.g. `ls`
-    - e.g. `ls -l` (list files in long format)
 - **pwd**: print working directory
-    
+    This shows you the full path to the current directory
 
