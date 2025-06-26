@@ -1,7 +1,6 @@
     
 .ipynb_checkpoints/*
 *.pyc
-*.abf
 *.atf
 *.pro
 *.dat
@@ -12,4 +11,3 @@
 /data/archive/
 /notebook_archive
 /__pycache__
-/archive

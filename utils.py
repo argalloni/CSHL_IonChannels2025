@@ -3,388 +3,18 @@ import numpy as np
 import scipy
 from scipy import signal, stats
 from scipy.optimize import curve_fit
-from scipy.ndimage import gaussian_filter1d, maximum_filter1d
+from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
 from scipy.special import comb # for binomial coefficients
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import pyabf
 from pathlib import Path
 import h5py
-import os
-from typing import Optional, Union, Dict, Any, Tuple, List
 
 
 ###############################
-# Data import functions
+# Data import/processing functions
 ###############################
-def load_data_file1(filename: str, 
-                   format_string: str = 'double',
-                   t_min: float = 0.0,
-                   t_max: float = np.inf,
-                   min_sweep_index: int = -np.inf,
-                   max_sweep_index: int = np.inf) -> Dict[str, Any]:
-    """
-    Load WaveSurfer data into Python.
-    
-    Parameters:
-    -----------
-    filename : str
-        Path to the WaveSurfer .h5 file
-    format_string : str, optional
-        Format for returned data: 'double' (default), 'single', or 'raw'
-        - 'double': scaled double-precision floats
-        - 'single': scaled single-precision floats  
-        - 'raw': unscaled ADC counts as int16 values
-    t_min : float, optional
-        Minimum time in seconds (default: 0.0)
-    t_max : float, optional
-        Maximum time in seconds (default: inf)
-    min_sweep_index : int, optional
-        Minimum sweep index to load (default: -inf)
-    max_sweep_index : int, optional
-        Maximum sweep index to load (default: +inf)
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing the loaded data structure
-    """
-    
-    # Validate arguments
-    if not np.isfinite(t_max) and t_min != 0:
-        raise ValueError('If t_max is infinite, t_min must be equal to 0')
-    
-    do_subset_in_time = (np.isscalar(t_min) and np.isscalar(t_max) and 
-                        np.isfinite(t_min) and np.isfinite(t_max))
-    
-    # Check file existence
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f'The file {filename} does not exist.')
-    
-    # Check file extension
-    _, ext = os.path.splitext(filename)
-    if ext.lower() != '.h5':
-        raise ValueError('File must be a WaveSurfer-generated HDF5 (.h5) file.')
-    
-    # Read sampling rate if time subsetting is needed
-    if do_subset_in_time:
-        try:
-            with h5py.File(filename, 'r') as f:
-                try:
-                    sample_rate = f['/header/AcquisitionSampleRate'][()]
-                except KeyError:
-                    sample_rate = f['/header/Acquisition/SampleRate'][()]
-        except Exception as e:
-            raise RuntimeError(f'Error reading sample rate: {e}')
-            
-        first_scan_index = int(np.round(t_min * sample_rate))  # 0-based index in Python
-        scan_count = int(np.round((t_max - t_min) * sample_rate))
-    else:
-        first_scan_index = None
-        scan_count = None
-    
-    # Load the HDF5 structure
-    with h5py.File(filename, 'r') as f:
-        data_file_as_struct = crawl_h5_tree('/', f, do_subset_in_time, 
-                                           first_scan_index, scan_count,
-                                           min_sweep_index, max_sweep_index)
-    
-    # Correct sample rates for old WS versions
-    if 'header' in data_file_as_struct and 'VersionString' in data_file_as_struct['header']:
-        version_string = data_file_as_struct['header']['VersionString']
-        if isinstance(version_string, bytes):
-            version_string = version_string.decode('utf-8')
-        try:
-            version = float(version_string)
-        except ValueError:
-            version = 0.0
-    else:
-        version = 0.0
-    
-    if version < 0.9125:
-        # Fix acquisition sample rate
-        if 'Acquisition' in data_file_as_struct['header']:
-            nominal_acq_sr = data_file_as_struct['header']['Acquisition']['SampleRate']
-            nominal_n_ticks = 100e6 / nominal_acq_sr
-            if nominal_n_ticks != np.round(nominal_n_ticks):
-                actual_acq_sr = 100e6 / np.floor(nominal_n_ticks)
-                data_file_as_struct['header']['Acquisition']['SampleRate'] = actual_acq_sr
-        
-        # Fix stimulation sample rate
-        if 'Stimulation' in data_file_as_struct['header']:
-            nominal_stim_sr = data_file_as_struct['header']['Stimulation']['SampleRate']
-            nominal_n_ticks = 100e6 / nominal_stim_sr
-            if nominal_n_ticks != np.round(nominal_n_ticks):
-                actual_stim_sr = 100e6 / np.round(nominal_n_ticks)
-                data_file_as_struct['header']['Stimulation']['SampleRate'] = actual_stim_sr
-    
-    # Handle analog signal scaling
-    if format_string.lower() == 'raw':
-        return data_file_as_struct
-    
-    # Get number of AI channels
-    try:
-        if 'NAIChannels' in data_file_as_struct['header']:
-            n_ai_channels = data_file_as_struct['header']['NAIChannels']
-        else:
-            n_ai_channels = data_file_as_struct['header']['Acquisition']['NAnalogChannels']
-    except KeyError:
-        raise RuntimeError('Unable to read number of AI channels from file.')
-    
-    if n_ai_channels == 0:
-        return data_file_as_struct
-    
-    # Get scaling information
-    try:
-        if 'AIChannelScales' in data_file_as_struct['header']:
-            all_analog_channel_scales = data_file_as_struct['header']['AIChannelScales']
-        else:
-            all_analog_channel_scales = data_file_as_struct['header']['Acquisition']['AnalogChannelScales']
-    except KeyError:
-        raise RuntimeError('Unable to read channel scale information from file.')
-    
-    try:
-        if 'IsAIChannelActive' in data_file_as_struct['header']:
-            is_active = np.array(data_file_as_struct['header']['IsAIChannelActive'], dtype=bool)
-        else:
-            is_active = np.array(data_file_as_struct['header']['Acquisition']['IsAnalogChannelActive'], dtype=bool)
-    except KeyError:
-        raise RuntimeError('Unable to read active/inactive channel information from file.')
-    
-    analog_channel_scales = all_analog_channel_scales[is_active]
-    
-    # Get scaling coefficients
-    try:
-        if 'AIScalingCoefficients' in data_file_as_struct['header']:
-            analog_scaling_coefficients = data_file_as_struct['header']['AIScalingCoefficients']
-        else:
-            analog_scaling_coefficients = data_file_as_struct['header']['Acquisition']['AnalogScalingCoefficients']
-    except KeyError:
-        raise RuntimeError('Unable to read channel scaling coefficients from file.')
-    
-    # Scale AI signals
-    does_user_want_single = format_string.lower() == 'single'
-    
-    for field_name in list(data_file_as_struct.keys()):
-        if (len(field_name) >= 5 and 
-            (field_name.startswith('sweep') or field_name.startswith('trial'))):
-            
-            if 'analogScans' in data_file_as_struct[field_name]:
-                analog_data_as_counts = data_file_as_struct[field_name]['analogScans']
-                
-                if does_user_want_single:
-                    scaled_data = scaled_single_analog_data_from_raw(
-                        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
-                else:
-                    scaled_data = scaled_double_analog_data_from_raw(
-                        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
-                
-                data_file_as_struct[field_name]['analogScans'] = scaled_data
-    
-    return data_file_as_struct
-
-
-def crawl_h5_tree1(path_to_group: str, 
-                  h5_file: h5py.File,
-                  do_subset_in_time: bool,
-                  first_scan_index: Optional[int],
-                  scan_count: Optional[int],
-                  min_sweep_index: float,
-                  max_sweep_index: float) -> Dict[str, Any]:
-    """Recursively crawl HDF5 tree and build dictionary structure."""
-    
-    dataset_names, subgroup_names = get_group_info(path_to_group, h5_file)
-    
-    s = {}
-    
-    # Process subgroups
-    for subgroup_name in subgroup_names:
-        if subgroup_name.startswith('sweep_'):
-            # Special handling for sweep groups
-            sweep_index_str = subgroup_name[6:]  # Remove 'sweep_' prefix
-            try:
-                sweep_index = int(sweep_index_str)
-                if min_sweep_index <= sweep_index <= max_sweep_index:
-                    field_name = field_name_from_hdf_name(subgroup_name)
-                    path_to_subgroup = f"{path_to_group}{subgroup_name}/"
-                    s[field_name] = crawl_h5_tree(path_to_subgroup, h5_file, 
-                                                 do_subset_in_time, first_scan_index, 
-                                                 scan_count, min_sweep_index, max_sweep_index)
-            except ValueError:
-                # If sweep index is not a valid integer, skip
-                continue
-        else:
-            # Regular subgroups
-            field_name = field_name_from_hdf_name(subgroup_name)
-            path_to_subgroup = f"{path_to_group}{subgroup_name}/"
-            s[field_name] = crawl_h5_tree(path_to_subgroup, h5_file,
-                                         do_subset_in_time, first_scan_index,
-                                         scan_count, min_sweep_index, max_sweep_index)
-    
-    # Process datasets
-    for dataset_name in dataset_names:
-        path_to_dataset = f"{path_to_group}{dataset_name}"
-        
-        if dataset_name in ['analogScans', 'digitalScans']:
-            if do_subset_in_time and first_scan_index is not None and scan_count is not None:
-                dataset = h5_file[path_to_dataset]
-                if len(dataset.shape) < 2:
-                    channel_count = 1
-                    data = dataset[first_scan_index:first_scan_index + scan_count]
-                else:
-                    channel_count = dataset.shape[1]
-                    data = dataset[first_scan_index:first_scan_index + scan_count, :]
-            else:
-                data = h5_file[path_to_dataset][()]
-        else:
-            data = h5_file[path_to_dataset][()]
-        
-        # Handle string data
-        if isinstance(data, bytes):
-            data = data.decode('utf-8')
-        elif isinstance(data, np.ndarray) and data.dtype.kind in ['S', 'U']:
-            if data.size == 1:
-                data = str(data.item())
-            else:
-                data = [str(item) for item in data.flat]
-        
-        field_name = field_name_from_hdf_name(dataset_name)
-        s[field_name] = data
-    
-    return s
-
-
-def get_group_info1(path_to_group: str, h5_file: h5py.File) -> Tuple[List[str], List[str]]:
-    """Get dataset and subgroup names in the current group."""
-    
-    group = h5_file[path_to_group]
-    
-    dataset_names = []
-    subgroup_names = []
-    
-    for key in group.keys():
-        if isinstance(group[key], h5py.Dataset):
-            dataset_names.append(key)
-        elif isinstance(group[key], h5py.Group):
-            subgroup_names.append(key)
-    
-    return dataset_names, subgroup_names
-
-
-def field_name_from_hdf_name1(hdf_name: str) -> str:
-    """Convert HDF5 name to valid Python dictionary key."""
-    
-    try:
-        num_val = float(hdf_name)
-        if num_val == int(num_val):  # It's an integer
-            return f'n{hdf_name}'
-    except ValueError:
-        pass
-    
-    return hdf_name
-
-
-def scaled_double_analog_data_from_raw1(analog_data_as_counts: np.ndarray,
-                                     analog_channel_scales: np.ndarray,
-                                     analog_scaling_coefficients: np.ndarray) -> np.ndarray:
-    """Convert raw ADC counts to scaled double-precision values."""
-    
-    # Convert to float64
-    scaled_data = analog_data_as_counts.astype(np.float64)
-    
-    # Apply cubic polynomial scaling (simplified version)
-    # This is a placeholder - the actual scaling might be more complex
-    for i in range(scaled_data.shape[1] if len(scaled_data.shape) > 1 else 1):
-        if len(scaled_data.shape) > 1:
-            channel_data = scaled_data[:, i]
-        else:
-            channel_data = scaled_data
-            
-        # Apply scaling coefficients (assuming they're cubic polynomial coefficients)
-        if len(analog_scaling_coefficients.shape) > 1:
-            coeffs = analog_scaling_coefficients[i, :]
-        else:
-            coeffs = analog_scaling_coefficients
-            
-        # Apply polynomial transformation
-        scaled_channel = np.polyval(coeffs[::-1], channel_data)  # Reverse for numpy convention
-        
-        # Apply channel scale
-        if i < len(analog_channel_scales):
-            scaled_channel *= analog_channel_scales[i]
-        
-        if len(scaled_data.shape) > 1:
-            scaled_data[:, i] = scaled_channel
-        else:
-            scaled_data = scaled_channel
-    
-    return scaled_data
-
-
-def scaled_single_analog_data_from_raw1(analog_data_as_counts: np.ndarray,
-                                     analog_channel_scales: np.ndarray,
-                                     analog_scaling_coefficients: np.ndarray) -> np.ndarray:
-    """Convert raw ADC counts to scaled single-precision values."""
-    
-    # Use the double precision function then convert to float32
-    scaled_data = scaled_double_analog_data_from_raw(
-        analog_data_as_counts, analog_channel_scales, analog_scaling_coefficients)
-    
-    return scaled_data.astype(np.float32)
-
-
-def get_sweeps(f):
-    rec = pyabf.ABF(f)
-    swps = []
-    for swpNB in rec.sweepList:
-        rec.setSweep(swpNB)
-        swps.append((rec.sweepY,rec.sweepC))
-    swps = np.array(swps)
-    swp_time = rec.sweepX
-    return swps, swp_time, rec.dataRate
-
-
-def hdf5_to_dict(file_path):
-    """
-    Load an HDF5 file and convert it to a nested Python dictionary.
-
-    :param file_path (str): Path to the HDF5 file.
-    :return dict: nested Python dictionary with identical structure as the HDF5 file.
-    """
-    # Initial call to convert the top-level group in the HDF5 file
-    # (necessary because the top-level group is not a h5py.Group object)
-    with h5py.File(file_path, 'r') as f:
-        data_dict = {}
-        # Loop over the top-level keys in the HDF5 file
-        for key in f.keys():
-            if isinstance(f[key], h5py.Group):
-                # Recursively convert the group to a nested dictionary
-                data_dict[key] = convert_hdf5_group_to_dict(f[key])
-            else:
-                # If the key corresponds to a dataset, add it to the dictionary
-                data_dict[key] = f[key][()]
-    return data_dict
-
-
-def convert_hdf5_group_to_dict(group):
-    """
-    Helper function to recursively convert an HDF5 group to a nested Python dictionary.
-
-    :param group (h5py.Group): The HDF5 group to convert.
-    :return dict: Nested Python dictionary with identical structure as the HDF5 group.
-    """
-    data_dict = {}
-    # Loop over the keys in the HDF5 group
-    for key in group.keys():
-        if isinstance(group[key], h5py.Group):
-            # Recursively convert the group to a nested dictionary
-            data_dict[key] = convert_hdf5_group_to_dict(group[key])
-        else:
-            # If the key corresponds to a dataset, add it to the dictionary
-            data_dict[key] = group[key][()]
-
-    return data_dict
-
 
 class Trace():
     '''class for a time series data trace containing current and voltage recordings.
@@ -2043,6 +1673,122 @@ class Trace():
             else:
                 return results
 
+    def get_event_times(self, threshold: float, polarity: str = 'positive', 
+                        time_units: str = 's', channel: str = 'current', 
+                        min_distance: int = None, prominence: float = None,
+                        sweep: int = None):
+        """
+        Find event times based on peaks above or below a threshold.
+        
+        Parameters
+        ----------
+        threshold : float
+            Threshold value for peak detection. Peaks above this value (positive polarity)
+            or below this value (negative polarity) will be detected.
+        polarity : str, default='positive'
+            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
+        time_units : str, default='s'
+            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
+        channel : str, default='current'
+            Which channel to analyze. Options: 'current', 'voltage'.
+        min_distance : int, optional
+            Minimum number of samples between detected peaks. Helps avoid double-counting
+            closely spaced peaks.
+        prominence : float, optional
+            Required prominence of peaks. Helps filter out small fluctuations.
+        sweep : int, optional
+            For 2D data (separate sweeps), specify which sweep to analyze. 
+            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
+        
+        Returns
+        -------
+        numpy.ndarray or list of numpy.ndarray
+            Event times in specified units. For 2D data when sweep_idx is None,
+            returns a list with one array per sweep.
+        
+        Raises
+        ------
+        ValueError
+            If invalid parameters are provided or required data is not available.
+        ImportError
+            If scipy is not available for peak detection.
+        """
+        # Validate parameters
+        if polarity not in ['positive', 'negative']:
+            raise ValueError("polarity must be 'positive' or 'negative'")
+        
+        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
+            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
+        
+        if channel not in ['current', 'voltage']:
+            raise ValueError("channel must be 'current' or 'voltage'")
+        
+        # Get the appropriate data
+        if channel == 'current':
+            if self.current_data is None:
+                raise ValueError("No current data available")
+            data = self.current_data
+        else:  # voltage
+            if self.voltage_data is None:
+                raise ValueError("No voltage data available")
+            data = self.voltage_data
+        
+        def find_events_in_trace(trace_data):
+            """Helper function to find events in a 1D trace"""
+            if polarity == 'positive':
+                # Find peaks above threshold
+                # For positive peaks, we look for peaks in the original data
+                # and then filter by threshold
+                peak_indices, properties = signal.find_peaks(trace_data, 
+                                                    distance=min_distance,
+                                                    prominence=prominence)
+                # Filter peaks that are above threshold
+                above_threshold = trace_data[peak_indices] >= threshold
+                event_indices = peak_indices[above_threshold]
+                
+            else:  # negative polarity
+                # Find peaks below threshold
+                # For negative peaks, we invert the data and find peaks,
+                # then filter by threshold
+                inverted_data = -trace_data
+                peak_indices, properties = signal.find_peaks(inverted_data,
+                                                    distance=min_distance, 
+                                                    prominence=prominence)
+                # Filter peaks that are below threshold (in original data)
+                below_threshold = trace_data[peak_indices] <= threshold
+                event_indices = peak_indices[below_threshold]
+            
+            # Convert indices to times
+            event_times = event_indices * self.sampling
+            
+            # Convert to requested units
+            if time_units in ['ms', 'milliseconds']:
+                event_times = event_times * 1000
+            
+            if len(event_times) == 0:
+                print("WARNING: No events detected, double check your detection settings")
+            return event_times
+        
+        # Handle different data structures
+        if data.ndim == 1:
+            # 1D data (concatenated sweeps)
+            return find_events_in_trace(data)
+        
+        else:
+            # 2D data (separate sweeps)
+            if sweep in ['all', None]:
+                # Analyze all sweeps
+                event_times_list = []
+                for i in range(data.shape[0]):
+                    sweep_events = find_events_in_trace(data[i])
+                    event_times_list.append(sweep_events)
+                return event_times_list
+            elif isinstance(sweep, (int, float)):
+                # Analyze specific sweep
+                if sweep >= data.shape[0]:
+                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
+                return find_events_in_trace(data[sweep])
+
     def crop(self, timepoint: float = None, window: float = None, time_units: str = 's', 
             timepoint_2: float = None, preserve_metadata: bool = True, headstage: int | str = 'all'):
         """
@@ -2477,7 +2223,6 @@ class Trace():
                 
                 return all_results
 
-
     def get_measurements(self, start_time: float, end_time: float, measurement_type: str = 'mean', 
                             time_units: str = 's', sweep: int = None):
         """
@@ -2860,122 +2605,6 @@ class Trace():
             print(f"Sweep duration: {self.total_time:.2f} s")
             if total_spikes > 0:
                 print(f"Overall spike rate: {total_spikes/(self.num_sweeps * self.total_time):.2f} Hz")
-
-    def get_event_times(self, threshold: float, polarity: str = 'positive', 
-                        time_units: str = 's', channel: str = 'current', 
-                        min_distance: int = None, prominence: float = None,
-                        sweep: int = None):
-        """
-        Find event times based on peaks above or below a threshold.
-        
-        Parameters
-        ----------
-        threshold : float
-            Threshold value for peak detection. Peaks above this value (positive polarity)
-            or below this value (negative polarity) will be detected.
-        polarity : str, default='positive'
-            Peak polarity to detect. Options: 'positive' (above threshold), 'negative' (below threshold).
-        time_units : str, default='s'
-            Units for returned event times. Options: 's' (seconds), 'ms' (milliseconds).
-        channel : str, default='current'
-            Which channel to analyze. Options: 'current', 'voltage'.
-        min_distance : int, optional
-            Minimum number of samples between detected peaks. Helps avoid double-counting
-            closely spaced peaks.
-        prominence : float, optional
-            Required prominence of peaks. Helps filter out small fluctuations.
-        sweep : int, optional
-            For 2D data (separate sweeps), specify which sweep to analyze. 
-            If None and data is 2D, analyzes all sweeps and returns a list of arrays.
-        
-        Returns
-        -------
-        numpy.ndarray or list of numpy.ndarray
-            Event times in specified units. For 2D data when sweep_idx is None,
-            returns a list with one array per sweep.
-        
-        Raises
-        ------
-        ValueError
-            If invalid parameters are provided or required data is not available.
-        ImportError
-            If scipy is not available for peak detection.
-        """
-        # Validate parameters
-        if polarity not in ['positive', 'negative']:
-            raise ValueError("polarity must be 'positive' or 'negative'")
-        
-        if time_units not in ['s', 'seconds', 'ms', 'milliseconds']:
-            raise ValueError("time_units must be 's', 'seconds', 'ms', or 'milliseconds'")
-        
-        if channel not in ['current', 'voltage']:
-            raise ValueError("channel must be 'current' or 'voltage'")
-        
-        # Get the appropriate data
-        if channel == 'current':
-            if self.current_data is None:
-                raise ValueError("No current data available")
-            data = self.current_data
-        else:  # voltage
-            if self.voltage_data is None:
-                raise ValueError("No voltage data available")
-            data = self.voltage_data
-        
-        def find_events_in_trace(trace_data):
-            """Helper function to find events in a 1D trace"""
-            if polarity == 'positive':
-                # Find peaks above threshold
-                # For positive peaks, we look for peaks in the original data
-                # and then filter by threshold
-                peak_indices, properties = signal.find_peaks(trace_data, 
-                                                    distance=min_distance,
-                                                    prominence=prominence)
-                # Filter peaks that are above threshold
-                above_threshold = trace_data[peak_indices] >= threshold
-                event_indices = peak_indices[above_threshold]
-                
-            else:  # negative polarity
-                # Find peaks below threshold
-                # For negative peaks, we invert the data and find peaks,
-                # then filter by threshold
-                inverted_data = -trace_data
-                peak_indices, properties = signal.find_peaks(inverted_data,
-                                                    distance=min_distance, 
-                                                    prominence=prominence)
-                # Filter peaks that are below threshold (in original data)
-                below_threshold = trace_data[peak_indices] <= threshold
-                event_indices = peak_indices[below_threshold]
-            
-            # Convert indices to times
-            event_times = event_indices * self.sampling
-            
-            # Convert to requested units
-            if time_units in ['ms', 'milliseconds']:
-                event_times = event_times * 1000
-            
-            if len(event_times) == 0:
-                print("WARNING: No events detected, double check your detection settings")
-            return event_times
-        
-        # Handle different data structures
-        if data.ndim == 1:
-            # 1D data (concatenated sweeps)
-            return find_events_in_trace(data)
-        
-        else:
-            # 2D data (separate sweeps)
-            if sweep in ['all', None]:
-                # Analyze all sweeps
-                event_times_list = []
-                for i in range(data.shape[0]):
-                    sweep_events = find_events_in_trace(data[i])
-                    event_times_list.append(sweep_events)
-                return event_times_list
-            elif isinstance(sweep, (int, float)):
-                # Analyze specific sweep
-                if sweep >= data.shape[0]:
-                    raise ValueError(f"Sweep index {sweep} exceeds number of sweeps ({data.shape[0]})")
-                return find_events_in_trace(data[sweep])
 
     def subtract_baseline_old(self, start_time: float = 0, end_time: float = 1, time_units: str = 'ms', channel: str = 'current'):
         """
@@ -3686,245 +3315,62 @@ def combine_traces_across_files(data_files, average_across_sweeps=True, recordin
     return traces
 
 
-def analyze_spikes(voltage, time=None, sampling_rate=None, min_amplitude=10.0, 
-                  smoothing_sigma=1.0, prominence_factor=2.0):
+def hdf5_to_dict(file_path):
     """
-    Analyze action potential spikes using 3rd derivative peak detection.
-    
-    Parameters:
-    -----------
-    voltage : array-like
-        Voltage trace (mV)
-    time : array-like, optional
-        Time points corresponding to voltage samples. If None, uses indices.
-    sampling_rate : float, optional
-        Sampling rate in Hz. If provided and time is None, creates time array.
-    min_amplitude : float, default=10.0
-        Minimum spike amplitude (mV) to be counted as a spike
-    smoothing_sigma : float, default=1.0
-        Standard deviation for Gaussian smoothing before derivative calculation
-    prominence_factor : float, default=2.0
-        Factor for determining peak prominence in 3rd derivative
-    
-    Returns:
-    --------
-    dict with keys:
-        'spike_times': array of spike onset times
-        'threshold_voltages': array of threshold voltages at spike onset
-        'peak_voltages': array of peak voltages
-        'amplitudes': array of spike amplitudes (peak - threshold)
-        'widths_half_max': array of spike widths at half-maximum
-        'spike_indices': array of spike onset indices
+    Load an HDF5 file and convert it to a nested Python dictionary.
+
+    :param file_path (str): Path to the HDF5 file.
+    :return dict: nested Python dictionary with identical structure as the HDF5 file.
     """
-    
-    # Handle time array
-    if time is None:
-        if sampling_rate is not None:
-            time = np.arange(len(voltage)) / sampling_rate
-        else:
-            time = np.arange(len(voltage))
-    
-    # Convert to numpy arrays
-    voltage = np.array(voltage)
-    time = np.array(time)
-    
-    # Smooth the voltage trace to reduce noise
-    voltage_smooth = gaussian_filter1d(voltage, sigma=smoothing_sigma)
-    
-    # Calculate derivatives
-    dt = np.mean(np.diff(time))
-    dv_dt = np.gradient(voltage_smooth, dt)
-    d2v_dt2 = np.gradient(dv_dt, dt)
-    d3v_dt3 = np.gradient(d2v_dt2, dt)
-    
-    # Find peaks in the 3rd derivative (spike initiation points)
-    # Use adaptive prominence based on the standard deviation of the 3rd derivative
-    prominence_threshold = prominence_factor * np.std(d3v_dt3)
-    
-    # Find positive peaks in 3rd derivative
-    spike_candidates, properties = signal.find_peaks(d3v_dt3, 
-                                            prominence=prominence_threshold,
-                                            distance=int(0.001 / dt))  # Minimum 1ms between spikes
-    
-    # Initialize result lists
-    spike_times = []
-    threshold_voltages = []
-    peak_voltages = []
-    amplitudes = []
-    widths_half_max = []
-    spike_indices = []
-    
-    for spike_idx in spike_candidates:
-        # Find the actual spike peak (maximum voltage after the 3rd derivative peak)
-        # Look in a reasonable window after the spike initiation
-        search_window = int(0.005 / dt)  # 5ms search window
-        search_end = min(spike_idx + search_window, len(voltage))
-        
-        # Find the peak voltage in this window
-        peak_search_region = voltage_smooth[spike_idx:search_end]
-        if len(peak_search_region) == 0:
-            continue
-            
-        peak_offset = np.argmax(peak_search_region)
-        peak_idx = spike_idx + peak_offset
-        peak_voltage = voltage_smooth[peak_idx]
-        
-        # The threshold is the voltage at the 3rd derivative peak
-        threshold_voltage = voltage_smooth[spike_idx]
-        
-        # Calculate amplitude
-        amplitude = peak_voltage - threshold_voltage
-        
-        # Skip if amplitude is below threshold
-        if amplitude < min_amplitude:
-            continue
-        
-        # Calculate width at half-maximum
-        half_max_voltage = threshold_voltage + amplitude / 2
-        
-        # Find where the spike crosses half-max on the rising phase
-        rising_phase = voltage_smooth[spike_idx:peak_idx+1]
-        rising_cross_idx = None
-        for i in range(len(rising_phase)-1):
-            if (rising_phase[i] <= half_max_voltage and 
-                rising_phase[i+1] > half_max_voltage):
-                # Linear interpolation for more precise crossing point
-                frac = (half_max_voltage - rising_phase[i]) / (rising_phase[i+1] - rising_phase[i])
-                rising_cross_idx = spike_idx + i + frac
-                break
-        
-        # Find where the spike crosses half-max on the falling phase
-        # Look for up to 10ms after the peak
-        fall_search_window = int(0.01 / dt)
-        fall_search_end = min(peak_idx + fall_search_window, len(voltage_smooth))
-        falling_phase = voltage_smooth[peak_idx:fall_search_end]
-        
-        falling_cross_idx = None
-        for i in range(len(falling_phase)-1):
-            if (falling_phase[i] > half_max_voltage and 
-                falling_phase[i+1] <= half_max_voltage):
-                # Linear interpolation for more precise crossing point
-                frac = (half_max_voltage - falling_phase[i+1]) / (falling_phase[i] - falling_phase[i+1])
-                falling_cross_idx = peak_idx + i + frac
-                break
-        
-        # Calculate width if both crossings were found
-        if rising_cross_idx is not None and falling_cross_idx is not None:
-            width_samples = falling_cross_idx - rising_cross_idx
-            width_time = width_samples * dt
-        else:
-            width_time = np.nan
-        
-        # Store results
-        spike_times.append(time[spike_idx])
-        threshold_voltages.append(threshold_voltage)
-        peak_voltages.append(peak_voltage)
-        amplitudes.append(amplitude)
-        widths_half_max.append(width_time)
-        spike_indices.append(spike_idx)
-    
-    return {
-        'spike_times': np.array(spike_times),
-        'threshold_voltages': np.array(threshold_voltages),
-        'peak_voltages': np.array(peak_voltages),
-        'amplitudes': np.array(amplitudes),
-        'widths_half_max': np.array(widths_half_max),
-        'spike_indices': np.array(spike_indices)
-    }
+    # Initial call to convert the top-level group in the HDF5 file
+    # (necessary because the top-level group is not a h5py.Group object)
+    with h5py.File(file_path, 'r') as f:
+        data_dict = {}
+        # Loop over the top-level keys in the HDF5 file
+        for key in f.keys():
+            if isinstance(f[key], h5py.Group):
+                # Recursively convert the group to a nested dictionary
+                data_dict[key] = convert_hdf5_group_to_dict(f[key])
+            else:
+                # If the key corresponds to a dataset, add it to the dictionary
+                data_dict[key] = f[key][()]
+    return data_dict
 
 
-def plot_spike_analysis(voltage, time, spike_results, show_derivatives=False):
+def convert_hdf5_group_to_dict(group):
     """
-    Plot the voltage trace with detected spikes and their properties.
-    
-    Parameters:
-    -----------
-    voltage : array-like
-        Voltage trace (mV)
-    time : array-like
-        Time points (s)
-    spike_results : dict
-        Results from analyze_spikes function
-    show_derivatives : bool, default=False
-        Whether to show derivative traces in subplots
+    Helper function to recursively convert an HDF5 group to a nested Python dictionary.
+
+    :param group (h5py.Group): The HDF5 group to convert.
+    :return dict: Nested Python dictionary with identical structure as the HDF5 group.
     """
-    import matplotlib.pyplot as plt
-    
-    if show_derivatives:
-        fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
-        
-        # Recalculate derivatives for plotting
-        voltage_smooth = gaussian_filter1d(voltage, sigma=1.0)
-        dt = np.mean(np.diff(time))
-        dv_dt = np.gradient(voltage_smooth, dt)
-        d2v_dt2 = np.gradient(dv_dt, dt)
-        d3v_dt3 = np.gradient(d2v_dt2, dt)
-        
-        # Plot voltage
-        axes[0].plot(time, voltage, 'k-', linewidth=1, label='Voltage')
-        axes[0].plot(spike_results['spike_times'], spike_results['threshold_voltages'], 
-                    'ro', markersize=8, label='Threshold')
-        axes[0].plot(spike_results['spike_times'], spike_results['peak_voltages'], 
-                    'go', markersize=8, label='Peak')
-        axes[0].set_ylabel('Voltage (mV)')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # Plot derivatives
-        axes[1].plot(time, dv_dt, 'b-', linewidth=1)
-        axes[1].set_ylabel('1st Derivative')
-        axes[1].grid(True, alpha=0.3)
-        
-        axes[2].plot(time, d2v_dt2, 'r-', linewidth=1)
-        axes[2].set_ylabel('2nd Derivative')
-        axes[2].grid(True, alpha=0.3)
-        
-        axes[3].plot(time, d3v_dt3, 'g-', linewidth=1)
-        axes[3].axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        axes[3].plot(spike_results['spike_times'], 
-                    [d3v_dt3[idx] for idx in spike_results['spike_indices']], 
-                    'ro', markersize=8)
-        axes[3].set_ylabel('3rd Derivative')
-        axes[3].set_xlabel('Time (s)')
-        axes[3].grid(True, alpha=0.3)
-        
-    else:
-        fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-        
-        # Plot voltage trace
-        ax.plot(time, voltage, 'k-', linewidth=1, label='Voltage')
-        
-        # Mark spike thresholds and peaks
-        ax.plot(spike_results['spike_times'], spike_results['threshold_voltages'], 
-                'ro', markersize=8, label='Threshold')
-        ax.plot(spike_results['spike_times'], spike_results['peak_voltages'], 
-                'go', markersize=8, label='Peak')
-        
-        # Draw half-max lines for width measurement
-        for i, (spike_time, thresh, peak, width) in enumerate(
-            zip(spike_results['spike_times'], spike_results['threshold_voltages'], 
-                spike_results['peak_voltages'], spike_results['widths_half_max'])):
-            
-            if not np.isnan(width):
-                half_max = thresh + (peak - thresh) / 2
-                ax.hlines(half_max, spike_time - width/2, spike_time + width/2, 
-                         colors='orange', linestyles='--', alpha=0.7)
-        
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Voltage (mV)')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        ax.set_title(f'Detected {len(spike_results["spike_times"])} spikes')
-    
-    plt.tight_layout()
-    plt.show()
+    data_dict = {}
+    # Loop over the keys in the HDF5 group
+    for key in group.keys():
+        if isinstance(group[key], h5py.Group):
+            # Recursively convert the group to a nested dictionary
+            data_dict[key] = convert_hdf5_group_to_dict(group[key])
+        else:
+            # If the key corresponds to a dataset, add it to the dictionary
+            data_dict[key] = group[key][()]
+
+    return data_dict
+
+
+def time_to_index(t, sampling_rate, time_units='ms'):
+    """
+    Convert time in milliseconds to index in the sweep, based on the sampling frequency.
+    """
+    if time_units in ['ms', 'milliseconds']:
+        return int(t * sampling_rate / 1000)
+    elif time_units in ['s', 'seconds']:
+        return int(t * sampling_rate)
 
 
 
 ###############################
 # Signal Processing
 ###############################
-from scipy.ndimage import median_filter, uniform_filter1d
 def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
     """
     Multiple methods for baseline correction in single-channel recordings.
@@ -4014,6 +3460,7 @@ def baseline_correction(data, sampling_freq, method='polynomial', **kwargs):
     else:
         return corrected_traces, baselines
 
+
 def rolling_percentile(data, window, percentile):
     """Rolling percentile calculation"""
     result = np.zeros_like(data)
@@ -4026,6 +3473,7 @@ def rolling_percentile(data, window, percentile):
     
     return result
 
+
 def running_minimum(data, window):
     """Running minimum calculation"""
     result = np.zeros_like(data)
@@ -4037,6 +3485,7 @@ def running_minimum(data, window):
         result[i] = np.min(data[start:end])
     
     return result
+
 
 def adaptive_baseline_correction(data, sampling_freq, closed_level_percentile=20):
     """
@@ -5161,52 +4610,6 @@ def print_p_open_results(p_estimate, residuals, P_obs, n):
     print("="*50)
 
 
-###############################
-# Data processing functions
-###############################
-def select_sweep_window(sweeps, time, start, end, sampling_freq, channel=0):
-    if end != -1:
-        assert start < end, "start_time must be before end_time"
-    assert start < time[-1]*1000, f"start_time ({start} ms) must be before end of sweep: {time[-1]*1000:.3f} ms"
-
-    i_start = int(start * sampling_freq / 1000)
-    i_end = int(end * sampling_freq / 1000)
-    return sweeps[:,channel,i_start:i_end], time[i_start:i_end]*1000
-
-
-def get_step_measurements(sweeps, time, start_time, end_time, sampling_freq, measurement_type, abs=False):
-    current_traces, time_i = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=0)
-    voltage_traces, time_v = select_sweep_window(sweeps, time, start_time, end_time, sampling_freq, channel=1)
-
-    if measurement_type == 'mean':
-        current_steps = np.mean(current_traces, axis=1)
-        voltage_steps = np.mean(voltage_traces, axis=1)
-    elif measurement_type == 'max':
-        current_steps = np.max(current_traces, axis=1)
-        voltage_steps = np.max(voltage_traces, axis=1)
-    elif measurement_type == 'min':
-        current_steps = np.min(current_traces, axis=1)
-        voltage_steps = np.min(voltage_traces, axis=1)
-    elif measurement_type == 'peak':
-        current_traces_abs = np.abs(current_traces)
-        current_steps_loc = np.argmax(current_traces_abs, axis=1)
-        num_sweeps = len(current_traces)
-        voltage_steps = voltage_traces[np.arange(num_sweeps), current_traces_abs.argmax(axis=1)]
-        current_steps = current_traces[np.arange(num_sweeps), current_traces_abs.argmax(axis=1)]
-
-    return voltage_steps, current_steps
-
-
-def time_to_index(t, sampling_rate, time_units='ms'):
-    """
-    Convert time in milliseconds to index in the sweep, based on the sampling frequency.
-    """
-    if time_units in ['ms', 'milliseconds']:
-        return int(t * sampling_rate / 1000)
-    elif time_units in ['s', 'seconds']:
-        return int(t * sampling_rate)
-
-
 
 ###############################
 # Plotting functions
@@ -5284,6 +4687,7 @@ def fit_IV_curve(voltage_steps, current_steps, voltage_start, voltage_end):
 
     return slope, intercept, E_rev
 
+
 def plot_IV(voltage, current, ax=None, xlabel_coords=None, ylabel_coords=None):
     if ax is None:
         fig, ax = plt.subplots()
@@ -5339,135 +4743,6 @@ def plot_IV(voltage, current, ax=None, xlabel_coords=None, ylabel_coords=None):
 
     return ax
 
-def plot_spike_raster(spike_data, sweep_duration=None, time_units='ms', 
-                      marker_height=0.8, marker_width=1.0, figsize=(10, 6),
-                      title=None, xlabel=None, ylabel='Sweep', 
-                      color='black', alpha=1.0, ax=None):
-    """
-    Create a raster plot showing spike times as vertical lines.
-    
-    Parameters
-    ----------
-    spike_data : dict or list of dict
-        Spike analysis results from analyze_action_potentials with return_dict=True.
-        - Single sweep: dict with 'spike_times' key
-        - Multiple sweeps: list of dicts, each with 'spike_times' key
-    sweep_duration : float, optional
-        Duration of each sweep in time_units. If None, automatically determined from data.
-    time_units : str, default='ms'
-        Time units for x-axis ('ms' or 's').
-    marker_height : float, default=0.8
-        Height of spike markers as fraction of row height (0-1).
-    marker_width : float, default=1.0
-        Width of spike markers in points.
-    figsize : tuple, default=(10, 6)
-        Figure size (width, height) in inches.
-    title : str, optional
-        Plot title. If None, uses default title.
-    xlabel : str, optional
-        X-axis label. If None, uses default based on time_units.
-    ylabel : str, default='Sweep'
-        Y-axis label.
-    color : str or array-like, default='black'
-        Color for spike markers. Can be single color or array of colors per sweep.
-    alpha : float, default=1.0
-        Transparency of spike markers (0-1).
-    ax : matplotlib.axes.Axes, optional
-        Existing axes to plot on. If None, creates new figure.
-        
-    Returns
-    -------
-    fig, ax : matplotlib figure and axes
-        The figure and axes objects containing the raster plot.
-    """
-    
-    # Handle single sweep vs multiple sweeps
-    if isinstance(spike_data, dict):
-        # Single sweep - convert to list for uniform handling
-        spike_data_list = [spike_data]
-    else:
-        spike_data_list = spike_data
-    
-    n_sweeps = len(spike_data_list)
-    
-    # Create figure if ax not provided
-    if ax is None:
-        fig, ax = plt.subplots(figsize=figsize)
-    else:
-        fig = ax.get_figure()
-    
-    # Plot spikes for each sweep
-    for sweep_idx, sweep_data in enumerate(spike_data_list):
-        if 'spike_times' not in sweep_data:
-            print(f"Warning: No 'spike_times' key found in sweep {sweep_idx}")
-            continue
-            
-        spike_times = sweep_data['spike_times']
-        
-        if len(spike_times) > 0:
-            # Calculate y-positions for this sweep
-            # Sweeps are numbered from bottom to top (0 at bottom)
-            y_center = sweep_idx
-            y_bottom = y_center - (marker_height / 2)
-            y_top = y_center + (marker_height / 2)
-            
-            # Plot vertical lines for each spike
-            for spike_time in spike_times:
-                ax.vlines(spike_time, y_bottom, y_top, 
-                         colors=color if isinstance(color, str) else color[sweep_idx],
-                         linewidth=marker_width, alpha=alpha)
-    
-    # Set axis limits
-    if sweep_duration is not None:
-        ax.set_xlim(0, sweep_duration)
-    else:
-        # Determine from data
-        all_spike_times = []
-        for sweep_data in spike_data_list:
-            if 'spike_times' in sweep_data and len(sweep_data['spike_times']) > 0:
-                all_spike_times.extend(sweep_data['spike_times'])
-        
-        if all_spike_times:
-            max_time = max(all_spike_times)
-            # Add 5% padding
-            ax.set_xlim(0, max_time * 1.05)
-        else:
-            # No spikes found, use default
-            ax.set_xlim(0, 1000 if time_units == 'ms' else 1)
-    
-    ax.set_ylim(-0.5, n_sweeps - 0.5)
-    
-    # Set labels
-    if xlabel is None:
-        xlabel = f'Time ({time_units})'
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    
-    if title is None:
-        title = f'Spike Raster Plot ({n_sweeps} sweep{"s" if n_sweeps > 1 else ""})'
-    ax.set_title(title)
-    
-    # Set y-ticks to show sweep numbers
-    if n_sweeps > 1:
-        ax.set_yticks(range(n_sweeps))
-        ax.set_yticklabels(range(1, n_sweeps + 1))  # Label sweeps 1, 2, 3, etc.
-    else:
-        ax.set_yticks([0])
-        ax.set_yticklabels(['1'])
-    
-    # Add grid for better readability
-    ax.grid(True, axis='x', alpha=0.3)
-    
-    # Add spike count information
-    total_spikes = sum(len(sd.get('spike_times', [])) for sd in spike_data_list)
-    info_text = f'Total spikes: {total_spikes}'
-    if n_sweeps > 1:
-        spikes_per_sweep = [len(sd.get('spike_times', [])) for sd in spike_data_list]
-        mean_spikes = np.mean(spikes_per_sweep)
-    
-    plt.tight_layout()
-    
-    return fig, ax
 
 def plot_spike_raster_from_trace(trace, min_spike_amplitude=5.0, max_width=10.0, 
                                 min_ISI=1.0, headstage=0, **plot_kwargs):
@@ -5509,6 +4784,7 @@ def plot_spike_raster_from_trace(trace, min_spike_amplitude=5.0, max_width=10.0,
     
     # Create raster plot
     return plot_spike_raster(spike_data, **plot_kwargs)
+
 
 def get_spike_counts(spike_data, return_stats=False):
     """
@@ -5574,6 +4850,7 @@ def get_spike_counts(spike_data, return_stats=False):
         else:
             return spike_counts
 
+
 def compute_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
     """
     Converts spike times to a continuous firing rate trace using Gaussian convolution.
@@ -5602,6 +4879,7 @@ def compute_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
     firing_rate = gaussian_filter1d(spike_train, sigma=sigma_samples) * sampling_rate
 
     return time, firing_rate
+
 
 def fast_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
     """
@@ -5634,6 +4912,7 @@ def fast_firing_rate(spike_times, duration, sampling_rate, sigma_ms=50):
         firing_rate[s_lo:s_hi] += kernel[k_lo:k_hi]
 
     return time, firing_rate
+
 
 def plot_spike_histograms(spike_data, bins='auto', figsize=(12, 4), 
                          colors=None, alpha=0.7, density=False,
@@ -5805,161 +5084,6 @@ def plot_spike_histograms(spike_data, bins='auto', figsize=(12, 4),
     
     return fig, axes, stats
 
-def plot_spike_property_distributions(spike_data, property='all', plot_type='violin',
-                                    figsize=(8, 6), show_points=True,
-                                    voltage_unit='mV', time_unit='ms'):
-    """
-    Create violin or box plots comparing spike properties across sweeps.
-    
-    Parameters
-    ----------
-    spike_data : list of dict
-        Spike analysis results from multiple sweeps.
-    property : str, default='all'
-        Which property to plot: 'peak_voltages', 'spike_amplitudes', 'spike_widths', or 'all'.
-    plot_type : str, default='violin'
-        Type of plot: 'violin', 'box', or 'both'.
-    figsize : tuple, default=(8, 6)
-        Figure size (width, height) in inches.
-    show_points : bool, default=True
-        If True, overlay individual data points.
-    voltage_unit : str, default='mV'
-        Unit for voltage measurements.
-    time_unit : str, default='ms'
-        Unit for time measurements.
-        
-    Returns
-    -------
-    fig, ax : matplotlib figure and axes
-        Figure and axes objects containing the plot.
-    """
-    import matplotlib.pyplot as plt
-    import numpy as np
-    
-    if not isinstance(spike_data, list):
-        raise ValueError("This function requires data from multiple sweeps")
-    
-    # Prepare data for each sweep
-    sweep_data = {}
-    properties_to_plot = []
-    units = {}
-    
-    if property == 'all' or property == 'peak_voltages':
-        sweep_data['Peak Voltages'] = [sweep.get('peak_voltages', []) for sweep in spike_data]
-        properties_to_plot.append('Peak Voltages')
-        units['Peak Voltages'] = voltage_unit
-        
-    if property == 'all' or property == 'spike_amplitudes':
-        sweep_data['Spike Amplitudes'] = [sweep.get('spike_amplitudes', []) for sweep in spike_data]
-        properties_to_plot.append('Spike Amplitudes')
-        units['Spike Amplitudes'] = voltage_unit
-        
-    if property == 'all' or property == 'spike_widths':
-        sweep_data['Spike Widths'] = [sweep.get('spike_widths', []) for sweep in spike_data]
-        properties_to_plot.append('Spike Widths')
-        units['Spike Widths'] = time_unit
-    
-    # Create figure
-    if property == 'all':
-        fig, axes = plt.subplots(1, 3, figsize=(figsize[0]*1.5, figsize[1]))
-        axes = axes.flatten()
-    else:
-        fig, ax = plt.subplots(figsize=figsize)
-        axes = [ax]
-    
-    # Plot each property
-    for idx, prop in enumerate(properties_to_plot):
-        ax = axes[idx]
-        data_list = sweep_data[prop]
-        
-        # Filter out empty sweeps
-        filtered_data = [d for d in data_list if len(d) > 0]
-        sweep_indices = [i+1 for i, d in enumerate(data_list) if len(d) > 0]
-        
-        if len(filtered_data) == 0:
-            ax.text(0.5, 0.5, f'No {prop.lower()} detected', 
-                   transform=ax.transAxes, ha='center', va='center',
-                   fontsize=12, color='gray')
-            ax.set_xlabel('Sweep')
-            ax.set_ylabel(f'{prop} ({units[prop]})')
-            ax.set_title(prop)
-            continue
-        
-        # Create plot
-        positions = range(len(filtered_data))
-        
-        if plot_type == 'violin' or plot_type == 'both':
-            parts = ax.violinplot(filtered_data, positions=positions, 
-                                 widths=0.7, showmeans=True, showextrema=True)
-            for pc in parts['bodies']:
-                pc.set_alpha(0.7)
-        
-        if plot_type == 'box' or plot_type == 'both':
-            bp = ax.boxplot(filtered_data, positions=positions, 
-                           widths=0.3 if plot_type == 'both' else 0.7,
-                           patch_artist=True, alpha=0.5 if plot_type == 'both' else 0.7)
-        
-        # Overlay individual points if requested
-        if show_points:
-            for pos, data in enumerate(filtered_data):
-                # Add small random jitter for visibility
-                jitter = np.random.normal(0, 0.04, size=len(data))
-                ax.scatter(pos + jitter, data, alpha=0.3, s=10, color='black')
-        
-        # Labels and formatting
-        ax.set_xticks(positions)
-        ax.set_xticklabels(sweep_indices)
-        ax.set_xlabel('Sweep')
-        ax.set_ylabel(f'{prop} ({units[prop]})')
-        ax.set_title(prop)
-        ax.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    return fig, axes[0] if len(axes) == 1 else axes
-
-def analyze_and_plot_spikes(trace, min_spike_amplitude=5.0, max_width=10.0, 
-                           min_ISI=1.0, headstage=0, **kwargs):
-    """
-    Convenience function to analyze spikes and create histogram plots.
-    
-    Parameters
-    ----------
-    trace : Trace
-        Trace object containing voltage data.
-    min_spike_amplitude : float, default=5.0
-        Minimum spike amplitude for analysis.
-    max_width : float, default=10.0
-        Maximum spike width for analysis.
-    min_ISI : float, default=1.0
-        Minimum inter-spike interval for analysis.
-    headstage : int, default=0
-        Which headstage to analyze.
-    **kwargs : dict
-        Additional arguments passed to plot_spike_histograms.
-        
-    Returns
-    -------
-    spike_data : dict or list of dict
-        Spike analysis results.
-    fig, axes : matplotlib figure and axes
-        Histogram plot objects.
-    stats : dict
-        Statistics for spike properties.
-    """
-    # Analyze spikes
-    spike_data = trace.analyze_action_potentials(
-        min_spike_amplitude=min_spike_amplitude,
-        max_width=max_width,
-        min_ISI=min_ISI,
-        headstage=headstage,
-        return_dict=True
-    )
-    
-    # Plot histograms
-    fig, axes, stats = plot_spike_histograms(spike_data, **kwargs)
-    
-    return spike_data, fig, axes, stats
-
 
 def analyze_threshold_events(time_array, voltage_array, threshold, plot=False, xlim=None):
     """
@@ -6082,80 +5206,5 @@ def analyze_threshold_events(time_array, voltage_array, threshold, plot=False, x
         return results
 
 
-def plot_traces(time, current_traces, voltage_traces=None, marker_1=None, marker_2=None, ax=None, height_ratios=(3, 1)):
-    """Plot current and optionally voltage traces with markers."""
-    
-    # Determine number of subplots
-    has_voltage = voltage_traces is not None
-    
-    # Create or validate axes
-    if ax is None:
-        if has_voltage:
-            fig, ax = plt.subplots(2, 1, figsize=(10, 8), sharex=False, height_ratios=height_ratios)
-        else:
-            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
-            ax = [ax]  # Make it a list for consistent indexing
-    else:
-        # Ensure ax is a list for consistent indexing
-        if not isinstance(ax, (list, np.ndarray)):
-            ax = [ax]
-    
-    # Plot current traces
-    ax[0].plot(time, current_traces.T, color='black', linewidth=0.8)
-    ax[0].set_ylabel('Current (pA)')
-    ax[0].set_xlabel('Time')
-    
-    # Plot voltage traces if provided
-    if has_voltage:
-        ax[1].set_prop_cycle(color=plt.cm.viridis(np.linspace(0, 1, voltage_traces.shape[0])))
-        ax[1].plot(time, voltage_traces.T, color='black', linewidth=0.5)
-        ax[1].set_ylabel('Voltage (mV)')
-    
-    # Add markers to all active subplots
-    active_axes = ax[:2] if has_voltage else ax[:1]
-    
-    for marker, label in [(marker_1, 'marker 1'), (marker_2, 'marker 2')]:
-        if marker is not None:
-            for subplot in active_axes:
-                ylims = subplot.get_ylim()
-                subplot.vlines(marker, *ylims, color='red', linestyle='-', linewidth=0.5)
-                subplot.text(marker, ylims[1], label, fontsize=10, color='red', ha='center', va='bottom')
-    
-    # Set x-axis limits for all active subplots
-    for subplot in active_axes:
-        subplot.set_xlim(time[0], time[-1])
-    
-    return ax
 
 
-def plot_exponential_fit(sweeps, sweeps_time, start_time, end_time, sampling_freq, ax=None):
-    # Select the voltage only between the markers
-    voltage_traces, t = select_sweep_window(sweeps, sweeps_time, start_time, end_time, sampling_freq, channel=0)
-
-    def exp_decay(t, V0, tau, V_inf):
-        return V0 * np.exp(-t / tau) + V_inf
-
-    tau_values = []
-    for trace in voltage_traces:
-        # Initial guess: [V0, tau, V_inf]
-        V0_guess = trace[0] - trace[-1]
-        tau_guess = 50 / sampling_freq  # ms
-        Vinf_guess = trace[-1]
-        p0 = [V0_guess, tau_guess, Vinf_guess]
-
-        popt, _ = curve_fit(exp_decay, t, trace, p0=p0, maxfev=2000)
-        V0_fit, tau_fit, Vinf_fit = popt
-        tau_values.append(tau_fit*1000)
-
-        # Overlay fit
-        fit_trace = exp_decay(t, *popt)
-        if ax is not None:
-            ax[0].plot(t*1000, fit_trace, color='r', alpha=1, linewidth=2)
-
-    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
-    ax.plot(tau_values, 'o-')
-    ax.set_xlabel('Sweep Index')
-    ax.set_ylabel('Tau (ms)')
-    ax.set_title('Tau Values for Each Sweep')
-
-    return tau_values, ax
